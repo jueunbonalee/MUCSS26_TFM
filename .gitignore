@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# R / RStudio
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Large generated NLP files
+data/processed/udpipe/
+data/processed/lemma_tokens.rds
+
+# Copyright-restricted newspaper full text
+data/raw/carabanchel_news.csv
+
+# Temporary files
+*.tmp
+*.log
+
+.RDataTmp

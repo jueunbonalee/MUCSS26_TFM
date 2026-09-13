@@ -1,0 +1,2170 @@
+---
+title: "Carabanchel: Material and Narrative Change, 2015–2025"
+author: "Jueun Lee"
+date: "12 September 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+find_project_root <- function(start = getwd()) {
+  current <- normalizePath(start, winslash = "/", mustWork = TRUE)
+
+  repeat {
+    if (
+      dir.exists(file.path(current, "data", "raw")) &&
+      dir.exists(file.path(current, "report"))
+    ) {
+      return(current)
+    }
+
+    parent <- dirname(current)
+    if (identical(parent, current)) {
+      stop("Cannot locate the MUCSS26_TFM project root.")
+    }
+    current <- parent
+  }
+}
+
+project_root <- find_project_root()
+knitr::opts_knit$set(root.dir = project_root)
+
+raw_dir <- file.path(project_root, "data", "raw")
+processed_dir <- file.path(project_root, "data", "processed")
+figures_dir <- file.path(project_root, "figures")
+
+dir.create(processed_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  include = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "95%",
+  fig.retina = 2
+)
+```
+
+```{=html}
+<style>
+.main-container { max-width: 1200px; }
+table { font-size: 0.90em; }
+</style>
+```
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(ggrepel)
+library(patchwork)
+library(knitr)
+library(tidytext)
+library(stopwords)
+library(udpipe)
+library(stm)
+library(quanteda)
+library(purrr)
+```
+
+```{r plot-settings}
+carabanchel_col <- "#C46A3A"
+dark_col <- "#444444"
+blue_col <- "#4C78A8"
+other_col <- "grey75"
+red_col <- "#C44E52"
+yellow_col <- "#D9A441"
+
+norm_code <- function(x) {
+  str_pad(as.character(as.integer(x)), width = 2, pad = "0")
+}
+
+theme_report <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 16),
+    plot.subtitle = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+```
+
+# 0. Research Design
+
+This report is the final consolidated analysis file for the MUCSS 2026 TFM project, *[thesis title]*. Its purpose is to document the analytical workflow clearly, ensure transparency in the research process, and make the analysis reproducible.
+
+The report provides a concise overview of the main analytical steps and results. More detailed and fully expanded analyses, including intermediate calculations, additional visualisations, and robustness checks, are available in the `analysis` folder of the GitHub repository:
+
+- `analysis/Rmd/01_part1_material_change.Rmd`
+- `analysis/Rmd/02_part2_narrative_change.Rmd`
+- `analysis/Rmd/03_robustness_checks.Rmd`
+
+The study examines recent urban change in Carabanchel from two complementary perspectives.
+
+1.  **Material change:** demographic, socioeconomic, and housing-market indicators are used to examine how Carabanchel changed relative to Madrid’s other 20 districts. The main cross-district comparison covers **2015–2022**, the common period for which the core indicators are available.
+2.  **Narrative change:** a corpus of newspaper coverage from *El Mundo*, *El País*, and *elDiario.es* is analysed from **2015 to 2025** using lexical analysis, topic modeling, and qualitative close reading.
+
+By combining these two parts, the study examines both measurable material change and changes in how Carabanchel has been represented in media, and compares how these two dimensions developed over time.
+
+## 0.1. Data sources
+
+| Dimension | Main measure / source |
+|:-----------------------------------|:-----------------------------------|
+| Population, age, nationality | Madrid Municipal Register (*Padrón municipal histórico*) |
+| Income | Madrid City Council household-income distribution data |
+| Advertised rent | Madrid Data Bank, based on historical Idealista reports |
+| Used-housing sale price | Madrid Data Bank / Colegio de Registradores de España |
+| Education | Madrid Data Bank, population by education level |
+| Occupational status | Ayuntamiento de Madrid, *Anuario Estadístico Municipal* |
+| News coverage | MyNews search, supplemented with official newspaper sites and ProQuest where needed |
+
+# 1. Material Change
+
+The material analysis examines Carabanchel’s demographic, socioeconomic, and housing-market change between 2015 and 2022 in comparison with all 21 districts of Madrid.
+
+For each indicator, the change between 2015 and 2022 is first calculated separately for every district. Changes in population shares, such as the share of foreign nationals or university-educated residents, are measured in percentage points, while changes in variables such as income, population, rent, and housing prices are measured as percentage changes from their 2015 values.
+
+The 21 districts are then ranked according to the size of their change for each indicator. A rank of 1 indicates the largest increase among the districts, while a rank of 21 indicates the smallest increase. Carabanchel’s rank is used to show whether the magnitude of change observed in the district was relatively high, moderate, or low within Madrid.
+
+This approach makes it possible to examine different dimensions of material change separately rather than assuming that demographic, socioeconomic, and housing-market indicators necessarily move in the same direction or at the same pace.
+
+## 1.1. Data preparation
+
+The following chunks reproduce the district-level datasets used in the analysis. They import the original data sources, standardise district identifiers, and construct the variables used in the 2015–2022 comparison.
+
+```{r padron-import-final, results='hide'}
+padron_files <- tibble(
+  year = 2015:2025,
+  path = file.path(
+    raw_dir, "padron_municipal", paste0(year, ".csv")
+  )
+)
+
+read_padron <- function(path, year) {
+  data <- read_delim(
+    path,
+    delim = ";",
+    show_col_types = FALSE,
+    trim_ws = TRUE
+  )
+
+  data <- data[, 1:12]
+
+  names(data) <- c(
+    "district_code",
+    "district_name",
+    "district_barrio_code",
+    "barrio_name",
+    "barrio_code",
+    "district_section_code",
+    "section_code",
+    "age",
+    "spanish_men",
+    "spanish_women",
+    "foreign_men",
+    "foreign_women"
+  )
+
+  data %>%
+    mutate(
+      year = as.integer(year),
+      district_code = norm_code(district_code),
+      age = parse_number(as.character(age)),
+      across(
+        c(spanish_men, spanish_women, foreign_men, foreign_women),
+        ~ replace_na(parse_number(as.character(.x)), 0)
+      )
+    )
+}
+
+padron_all <- map2_dfr(
+  padron_files$path,
+  padron_files$year,
+  read_padron
+)
+
+district_yearly <- padron_all %>%
+  mutate(
+    district_name = str_squish(district_name),
+    population = spanish_men + spanish_women + foreign_men + foreign_women,
+    foreign_population = foreign_men + foreign_women
+  ) %>%
+  group_by(year, district_code, district_name) %>%
+  summarise(
+    total_population = sum(population, na.rm = TRUE),
+    population_25_39 = sum(population[age >= 25 & age <= 39], na.rm = TRUE),
+    foreign_population = sum(foreign_population, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_25_39 = population_25_39 / total_population * 100,
+    pct_foreign = foreign_population / total_population * 100
+  )
+```
+
+```{r income-import-final, results='hide'}
+income_files <- file.path(
+  raw_dir,
+  "income",
+  c(
+    "20152016.xlsx",
+    "20162017.xlsx",
+    "20172018.xlsx",
+    "20192020.xlsm",
+    "20212022.xlsx"
+  )
+)
+
+read_income <- function(path) {
+  raw <- read_excel(
+    path,
+    sheet = "Distrito-Barrio",
+    skip = 5,
+    col_names = FALSE
+  )
+
+  years <- c(
+    as.numeric(raw[[2]][1]),
+    as.numeric(raw[[4]][1])
+  )
+
+  area_names <- str_squish(as.character(raw[[1]]))
+
+  district_rows <- which(
+    str_detect(area_names, "^\\d{1,2}\\.\\s")
+  )
+
+  bind_rows(
+    tibble(
+      year = years[1],
+      district_code = norm_code(str_extract(area_names[district_rows], "^\\d{1,2}")),
+      district_name = str_remove(area_names[district_rows], "^\\d{1,2}\\.\\s*"),
+      income_per_person = as.numeric(raw[[2]][district_rows])
+    ),
+    tibble(
+      year = years[2],
+      district_code = norm_code(str_extract(area_names[district_rows], "^\\d{1,2}")),
+      district_name = str_remove(area_names[district_rows], "^\\d{1,2}\\.\\s*"),
+      income_per_person = as.numeric(raw[[4]][district_rows])
+    )
+  )
+}
+
+income_district_yearly <- map_dfr(
+  income_files,
+  read_income
+) %>%
+  distinct(year, district_code, .keep_all = TRUE) %>%
+  arrange(year, district_code)
+```
+
+```{r rent-import-final, results='hide'}
+rent_monthly <- read_delim(
+  file.path(raw_dir, "rent", "rent_madrid_2015_2024.csv"),
+  delim = ";",
+  skip = 4,
+  n_max = 120,
+  locale = locale(decimal_mark = ","),
+  na = c("", ".."),
+  show_col_types = FALSE
+)
+
+names(rent_monthly)[1:2] <- c("year", "month")
+
+rent_monthly <- rent_monthly %>%
+  mutate(year = as.integer(year))
+
+rent_district_monthly <- rent_monthly %>%
+  select(-`Ciudad de Madrid`) %>%
+  pivot_longer(
+    cols = matches("^\\d{2}\\."),
+    names_to = "district",
+    values_to = "rent_per_m2"
+  ) %>%
+  mutate(
+    district_code = norm_code(str_extract(district, "^\\d{2}")),
+    district_name = str_remove(district, "^\\d{2}\\.\\s*")
+  )
+
+rent_district_yearly <- rent_district_monthly %>%
+  group_by(year, district_code, district_name) %>%
+  summarise(
+    rent_per_m2 = mean(rent_per_m2, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r sale-import-final, results='hide'}
+sale_price_raw <- read_delim(
+  file.path(raw_dir, "sale_price", "sale_price_madrid_2015_2025.csv"),
+  delim = ";",
+  skip = 7,
+  n_max = 242,
+  col_names = c(
+    "year",
+    "district",
+    "barrio",
+    "sale_price_per_m2"
+  ),
+  locale = locale(
+    decimal_mark = ",",
+    grouping_mark = "."
+  ),
+  show_col_types = FALSE
+)
+
+sale_price_district_yearly <- sale_price_raw %>%
+  filter(district != "Ciudad de Madrid") %>%
+  mutate(
+    year = as.integer(year),
+    district_code = norm_code(str_extract(district, "^\\d{2}")),
+    district_name = str_remove(district, "^\\d{2}\\.\\s*")
+  ) %>%
+  select(
+    year,
+    district_code,
+    district_name,
+    sale_price_per_m2
+  )
+```
+
+```{r education-import-final, results='hide'}
+education_files <- file.path(
+  raw_dir,
+  "education",
+  c(
+    "education_madrid_2015_2016.csv",
+    "education_madrid_2017_2018.csv",
+    "education_madrid_2019_2020.csv",
+    "education_madrid_2021_2022.csv",
+    "education_madrid_2023_2024.csv",
+    "education_madrid_2025.csv"
+  )
+)
+
+read_education <- function(path) {
+  n_data <- if (str_detect(basename(path), "2025\\.csv$")) 374 else 748
+
+  raw <- read_delim(
+    path,
+    delim = ";",
+    skip = 7,
+    n_max = n_data,
+    col_names = FALSE,
+    col_types = cols(.default = "c"),
+    show_col_types = FALSE
+  )
+
+  raw %>%
+    filter(
+      X3 == "Total",
+      str_detect(X1, "^1 de enero de \\d{4}$")
+    ) %>%
+    transmute(
+      year = as.integer(str_extract(X1, "\\d{4}$")),
+      district = X2,
+      population_25plus = parse_number(
+        X4,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      university_diploma = parse_number(
+        X13,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      university_technical = parse_number(
+        X14,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      university_degree = parse_number(
+        X15,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      postgraduate = parse_number(
+        X17,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      )
+    ) %>%
+    filter(district != "Ciudad de Madrid") %>%
+    mutate(
+      district_code = norm_code(str_extract(district, "^\\d{2}")),
+      district_name = str_remove(district, "^\\d{2}\\.\\s*"),
+      university_educated =
+        university_diploma +
+        university_technical +
+        university_degree +
+        postgraduate,
+      pct_university =
+        university_educated / population_25plus * 100
+    ) %>%
+    select(
+      year,
+      district_code,
+      district_name,
+      population_25plus,
+      university_educated,
+      pct_university
+    )
+}
+
+education_yearly <- map_dfr(
+  education_files,
+  read_education
+) %>%
+  arrange(year, district_code)
+```
+
+```{r occupation-import-final, results='hide'}
+occupation_raw <- read_excel(
+  file.path(raw_dir, "occupation", "occupation_madrid_2015_2022.xlsx"),
+  sheet = "tidy"
+)
+
+occupation_yearly <- occupation_raw %>%
+  filter(geography_type == "district") %>%
+  mutate(district_code = norm_code(district_code)) %>%
+  group_by(year, district_code, district_name) %>%
+  summarise(
+    total = sum(
+      n[contribution_group == "Grupo de cotización (Sólo R. General)"],
+      na.rm = TRUE
+    ),
+    g1 = sum(
+      n[contribution_group ==
+          "Ingenieros y licenciados. Personal de alta dirección"],
+      na.rm = TRUE
+    ),
+    g2 = sum(
+      n[contribution_group ==
+          "Ingenieros técnicos, peritos y ayudantes titulados"],
+      na.rm = TRUE
+    ),
+    g3 = sum(
+      n[contribution_group ==
+          "Jefes administrativos y de taller"],
+      na.rm = TRUE
+    ),
+    no_consta = sum(
+      n[contribution_group == "No consta"],
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+```
+
+## 1.2. Demographic change
+
+```{r demographic-calculations-final, results='hide'}
+demographic_change <- district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    young_change_pp = pct_25_39 - pct_25_39[year == 2015],
+    foreign_change_pp = pct_foreign - pct_foreign[year == 2015],
+    population_change_pct =
+      (total_population / total_population[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+young_change_2022 <- demographic_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(young_change_pp)))
+
+foreign_change_2022 <- demographic_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(foreign_change_pp)))
+
+population_change_2022 <- demographic_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(population_change_pct)))
+```
+
+```{r demographic-summary-final}
+demo_summary <- tibble(
+  Indicator = c(
+    "Share aged 25–39",
+    "Foreign-national share",
+    "Total population"
+  ),
+  `Carabanchel change, 2015–2022` = c(
+    paste0(
+      sprintf(
+        "%+.2f",
+        young_change_2022$young_change_pp[
+          young_change_2022$district_code == "11"
+        ]
+      ),
+      " pp"
+    ),
+    paste0(
+      sprintf(
+        "%+.2f",
+        foreign_change_2022$foreign_change_pp[
+          foreign_change_2022$district_code == "11"
+        ]
+      ),
+      " pp"
+    ),
+    paste0(
+      sprintf(
+        "%+.2f",
+        population_change_2022$population_change_pct[
+          population_change_2022$district_code == "11"
+        ]
+      ),
+      "%"
+    )
+  ),
+  `Rank among 21 districts` = c(
+    paste0(
+      young_change_2022$rank[
+        young_change_2022$district_code == "11"
+      ],
+      "/21"
+    ),
+    paste0(
+      foreign_change_2022$rank[
+        foreign_change_2022$district_code == "11"
+      ],
+      "/21"
+    ),
+    paste0(
+      population_change_2022$rank[
+        population_change_2022$district_code == "11"
+      ],
+      "/21"
+    )
+  )
+)
+
+kable(demo_summary, align = c("l", "r", "r"))
+```
+
+```{r demographic-bars-final, fig.width=15.5, fig.height=7.2}
+demo_plot_data <- list(
+  young = young_change_2022 %>%
+    mutate(
+      highlight = if_else(
+        district_code == "11",
+        "Carabanchel",
+        "Other districts"
+      )
+    ),
+  foreign = foreign_change_2022 %>%
+    mutate(
+      highlight = if_else(
+        district_code == "11",
+        "Carabanchel",
+        "Other districts"
+      )
+    ),
+  population = population_change_2022 %>%
+    mutate(
+      highlight = if_else(
+        district_code == "11",
+        "Carabanchel",
+        "Other districts"
+      )
+    )
+)
+
+plot_demo_young <- ggplot(
+  demo_plot_data$young,
+  aes(
+    x = reorder(district_name, young_change_pp),
+    y = young_change_pp,
+    fill = highlight
+  )
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Carabanchel" = carabanchel_col,
+      "Other districts" = other_col
+    )
+  ) +
+  labs(
+    title = "Share aged 25–39",
+    x = NULL,
+    y = "Change (pp)"
+  ) +
+  theme_report +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 7),
+    plot.title = element_text(size = 12)
+  )
+
+plot_demo_foreign <- ggplot(
+  demo_plot_data$foreign,
+  aes(
+    x = reorder(district_name, foreign_change_pp),
+    y = foreign_change_pp,
+    fill = highlight
+  )
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Carabanchel" = carabanchel_col,
+      "Other districts" = other_col
+    )
+  ) +
+  labs(
+    title = "Foreign-national share",
+    x = NULL,
+    y = "Change (pp)"
+  ) +
+  theme_report +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 7),
+    plot.title = element_text(size = 12)
+  )
+
+plot_demo_population <- ggplot(
+  demo_plot_data$population,
+  aes(
+    x = reorder(district_name, population_change_pct),
+    y = population_change_pct,
+    fill = highlight
+  )
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Carabanchel" = carabanchel_col,
+      "Other districts" = other_col
+    )
+  ) +
+  labs(
+    title = "Total population",
+    x = NULL,
+    y = "Change (%)"
+  ) +
+  theme_report +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 7),
+    plot.title = element_text(size = 12)
+  )
+
+plot_demographic <-
+  plot_demo_young +
+  plot_demo_foreign +
+  plot_demo_population +
+  plot_layout(ncol = 3) +
+  plot_annotation(
+    title = "Demographic change across Madrid districts, 2015–2022"
+  )
+
+plot_demographic
+```
+
+Carabanchel became **more demographically dynamic** during the common comparison period. Population and the foreign-national share increased strongly relative to many Madrid districts, while the share aged 25–39 did not show an equally strong rise.
+
+## 1.3. Socioeconomic upgrading
+
+```{r income-change-final, results='hide'}
+income_change <- income_district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    income_change_pct =
+      (income_per_person / income_per_person[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+income_change_2022 <- income_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(income_change_pct)))
+```
+
+```{r education-change-final, results='hide'}
+education_change <- education_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    education_change_pp =
+      pct_university - pct_university[year == 2015]
+  ) %>%
+  ungroup()
+
+education_change_2022 <- education_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(education_change_pp)))
+```
+
+```{r occupation-change-final, results='hide'}
+occupation_main <- occupation_yearly %>%
+  mutate(
+    pct_high_occupation = (g1 + g2) / total * 100
+  ) %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    occupation_change_pp =
+      pct_high_occupation - pct_high_occupation[year == 2015]
+  ) %>%
+  ungroup()
+
+occupation_change_2022 <- occupation_main %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(occupation_change_pp)))
+```
+
+```{r socioeconomic-summary-final}
+socio_summary <- tibble(
+  Indicator = c(
+    "Average net income per person",
+    "University-educated share",
+    "Higher occupational-status share"
+  ),
+  `Carabanchel change, 2015–2022` = c(
+    paste0(
+      "+",
+      sprintf("%.2f", income_change_2022$income_change_pct[income_change_2022$district_code == "11"]),
+      "%"
+    ),
+    paste0(
+      "+",
+      sprintf("%.2f", education_change_2022$education_change_pp[education_change_2022$district_code == "11"]),
+      " pp"
+    ),
+    paste0(
+      ifelse(
+        occupation_change_2022$occupation_change_pp[occupation_change_2022$district_code == "11"] >= 0,
+        "+", ""
+      ),
+      sprintf("%.2f", occupation_change_2022$occupation_change_pp[occupation_change_2022$district_code == "11"]),
+      " pp"
+    )
+  ),
+  `Rank among 21 districts` = c(
+    paste0(income_change_2022$rank[income_change_2022$district_code == "11"], "/21"),
+    paste0(education_change_2022$rank[education_change_2022$district_code == "11"], "/21"),
+    paste0(occupation_change_2022$rank[occupation_change_2022$district_code == "11"], "/21")
+  )
+)
+
+kable(socio_summary, align = c("l", "r", "r"))
+```
+
+```{r socioeconomic-bars-final, fig.width=15.5, fig.height=7.2}
+# FIGURE STATUS: THESIS
+socio_plot_data <- list(
+  income = income_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  education = education_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  occupation = occupation_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts"))
+)
+
+plot_socio_income <- ggplot(
+  socio_plot_data$income,
+  aes(x = reorder(district_name, income_change_pct), y = income_change_pct, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Income per person", subtitle = "2015–2022", x = NULL, y = "Change (%)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_socio_education <- ggplot(
+  socio_plot_data$education,
+  aes(x = reorder(district_name, education_change_pp), y = education_change_pp, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "University-educated share", subtitle = "2015–2022", x = NULL, y = "Change (pp)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_socio_occupation <- ggplot(
+  socio_plot_data$occupation,
+  aes(x = reorder(district_name, occupation_change_pp), y = occupation_change_pp, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Higher occupational status", subtitle = "2015–2022", x = NULL, y = "Change (pp)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_socioeconomic <-
+  plot_socio_income + plot_socio_education + plot_socio_occupation +
+  plot_layout(ncol = 3) +
+  plot_annotation(title = "Socioeconomic change across Madrid districts")
+
+plot_socioeconomic
+```
+
+The three indicators point in the same broad direction. Between 2015 and 2022, Carabanchel's income growth ranked near the bottom of Madrid districts, and changes in university education and higher occupational status were also comparatively weak. The district therefore does **not** show broad socioeconomic upgrading relative to the rest of Madrid during the common comparison period.
+
+## 1.4. Housing-market pressure
+
+```{r rent-change-final, results='hide'}
+rent_change <- rent_district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    rent_change_pct =
+      (rent_per_m2 / rent_per_m2[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+rent_change_2022 <- rent_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(rent_change_pct)))
+```
+
+```{r sale-change-final, results='hide'}
+sale_price_change <- sale_price_district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    sale_change_pct =
+      (sale_price_per_m2 / sale_price_per_m2[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+sale_price_change_2022 <- sale_price_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(sale_change_pct)))
+```
+
+```{r housing-bars-final, fig.width=13.5, fig.height=7.2}
+# FIGURE STATUS: THESIS
+housing_plot_data <- list(
+  rent = rent_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  sale = sale_price_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts"))
+)
+
+plot_housing_rent <- ggplot(
+  housing_plot_data$rent,
+  aes(x = reorder(district_name, rent_change_pct), y = rent_change_pct, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Advertised rent", subtitle = "2015–2022", x = NULL, y = "Change (%)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 8), plot.title = element_text(size = 13), plot.subtitle = element_text(size = 10))
+
+plot_housing_sale <- ggplot(
+  housing_plot_data$sale,
+  aes(x = reorder(district_name, sale_change_pct), y = sale_change_pct, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Used-housing sale price", subtitle = "2015–2022", x = NULL, y = "Change (%)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 8), plot.title = element_text(size = 13), plot.subtitle = element_text(size = 10))
+
+plot_housing_market <-
+  plot_housing_rent + plot_housing_sale +
+  plot_layout(ncol = 2) +
+  plot_annotation(title = "Housing-market change across Madrid districts")
+
+plot_housing_market
+```
+
+```{r rent-income-divergence-final, results='hide'}
+carabanchel_rent_growth <- rent_change_2022 %>%
+  filter(district_code == "11") %>%
+  pull(rent_change_pct)
+
+carabanchel_income_growth <- income_change_2022 %>%
+  filter(district_code == "11") %>%
+  pull(income_change_pct)
+
+rent_income_gap_pp <- carabanchel_rent_growth - carabanchel_income_growth
+```
+
+Housing moved differently from the socioeconomic indicators. Advertised-rent growth was among the fastest in Madrid between 2015 and 2022, while used-housing sale-price growth was substantial but less exceptional. Over the same period, advertised rents increased much faster than average resident income.
+
+## 1.5. Putting the material dimensions together
+
+The previous sections examine demographic, socioeconomic, and housing-market change separately. This section brings the main material indicators together to make the contrast between housing-market pressure and socioeconomic change easier to compare across districts.
+
+Because the indicators are measured in different units, their 2015–2022 changes are first standardized across the 21 Madrid districts using z-scores. A value above zero indicates a change above the district average, while a value below zero indicates a change below the district average.
+
+For socioeconomic change, education and occupational status are first combined into a social-status component:
+
+$$
+SocialStatus_i =
+\frac{z(Education_i) + z(Occupation_i)}{2}
+$$
+
+This component is then combined with income:
+
+$$
+SocioeconomicUpgrading_i =
+\frac{z(Income_i) + SocialStatus_i}{2}
+$$
+
+Education and occupational status are combined first because they capture closely related aspects of socioeconomic composition. This prevents them from jointly receiving twice the weight of income in the final measure.
+
+The resulting **socioeconomic upgrading score** represents each district's relative position within Madrid. A score of zero indicates the average change across the 21 districts, not an absence of change.
+
+Advertised-rent growth is standardised separately and plotted against this socioeconomic measure. The purpose is not to create a single gentrification score, but to examine whether districts experiencing stronger rental-market pressure also experienced stronger socioeconomic upgrading during the same period.
+
+```{r district-change-dataset-final, results='hide'}
+district_change_2022 <- rent_change %>%
+  filter(year == 2022) %>%
+  select(
+    district_code,
+    district_name,
+    rent_change_pct
+  ) %>%
+  left_join(
+    sale_price_change %>%
+      filter(year == 2022) %>%
+      select(district_code, sale_change_pct),
+    by = "district_code"
+  ) %>%
+  left_join(
+    income_change %>%
+      filter(year == 2022) %>%
+      select(district_code, income_change_pct),
+    by = "district_code"
+  ) %>%
+  left_join(
+    education_change %>%
+      filter(year == 2022) %>%
+      select(district_code, education_change_pp),
+    by = "district_code"
+  ) %>%
+  left_join(
+    occupation_main %>%
+      filter(year == 2022) %>%
+      select(district_code, occupation_change_pp),
+    by = "district_code"
+  )
+```
+
+```{r socioeconomic-upgrading-score-final, results='hide'}
+district_scores_2022 <- district_change_2022 %>%
+  mutate(
+    z_rent = as.numeric(scale(rent_change_pct)),
+    z_sale = as.numeric(scale(sale_change_pct)),
+    z_income = as.numeric(scale(income_change_pct)),
+    z_education = as.numeric(scale(education_change_pp)),
+    z_occupation = as.numeric(scale(occupation_change_pp)),
+    social_status = (z_education + z_occupation) / 2,
+    socioeconomic_upgrading =
+      (z_income + social_status) / 2
+  )
+```
+
+```{r rent-socio-plot-final, fig.width=10, fig.height=6.2}
+# FIGURE STATUS: THESIS CANDIDATE
+plot_scores <- district_scores_2022 %>%
+  mutate(
+    highlight = if_else(
+      district_code == "11",
+      "Carabanchel",
+      "Other districts"
+    )
+  )
+
+plot_rent_socio <- ggplot(
+  plot_scores,
+  aes(
+    x = socioeconomic_upgrading,
+    y = z_rent
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  geom_point(
+    aes(color = highlight, size = highlight)
+  ) +
+  geom_text_repel(
+    aes(label = district_name, color = highlight),
+    size = 3,
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(
+    values = c(
+      "Carabanchel" = carabanchel_col,
+      "Other districts" = dark_col
+    )
+  ) +
+  scale_size_manual(
+    values = c(
+      "Carabanchel" = 4,
+      "Other districts" = 2.2
+    )
+  ) +
+  labs(
+    title = "Rental-market pressure and socioeconomic upgrading",
+    subtitle = "Madrid districts, change from 2015 to 2022",
+    x = "Socioeconomic upgrading",
+    y = "Rent growth (standardized)",
+    color = NULL,
+    size = NULL
+  ) +
+  theme_report +
+  theme(legend.position = "none")
+
+plot_rent_socio
+```
+
+The plot makes the contrast visible: Carabanchel is positioned above the Madrid district average in rental growth but below the average in socioeconomic upgrading. In other words, relatively strong rental-market pressure between 2015 and 2022 did not coincide with equally strong district-wide growth in income, university education, or higher occupational status.
+
+This contrast is the main finding of the material analysis and provides the basis for interpreting Carabanchel's recent change as uneven across different dimensions.
+
+## 1.6. Carabanchel after 2022
+
+The cross-district core analysis ends in 2022. The following extension uses the Carabanchel series that continue beyond 2022 to examine whether the pattern observed during the common comparison period changed in the following years.
+
+```{r carabanchel-extension-final, results='hide'}
+carabanchel_extended <- district_yearly %>%
+  filter(
+    district_code == "11",
+    year >= 2015,
+    year <= 2025
+  ) %>%
+  select(
+    year,
+    total_population,
+    pct_25_39,
+    pct_foreign
+  ) %>%
+  left_join(
+    rent_district_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, rent_per_m2),
+    by = "year"
+  ) %>%
+  left_join(
+    sale_price_district_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, sale_price_per_m2),
+    by = "year"
+  ) %>%
+  left_join(
+    income_district_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, income_per_person),
+    by = "year"
+  ) %>%
+  left_join(
+    education_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, pct_university),
+    by = "year"
+  ) %>%
+  left_join(
+    occupation_main %>%
+      filter(district_code == "11") %>%
+      select(year, pct_high_occupation),
+    by = "year"
+  ) %>%
+  mutate(
+    population_index =
+      total_population / total_population[year == 2015] * 100,
+    rent_index =
+      rent_per_m2 / rent_per_m2[year == 2015] * 100,
+    sale_index =
+      sale_price_per_m2 / sale_price_per_m2[year == 2015] * 100,
+    university_change_pp =
+      pct_university - pct_university[year == 2015],
+    occupation_change_pp =
+      pct_high_occupation - pct_high_occupation[year == 2015],
+    young_change_pp =
+      pct_25_39 - pct_25_39[year == 2015],
+    foreign_change_pp =
+      pct_foreign - pct_foreign[year == 2015]
+  )
+```
+
+```{r housing-timeline-final, fig.width=10, fig.height=6}
+# FIGURE STATUS: THESIS CANDIDATE
+market_long <- carabanchel_extended %>%
+  select(
+    year,
+    rent_index,
+    sale_index
+  ) %>%
+  pivot_longer(
+    cols = c(rent_index, sale_index),
+    names_to = "indicator",
+    values_to = "index"
+  ) %>%
+  mutate(
+    indicator = recode(
+      indicator,
+      rent_index = "Advertised rent",
+      sale_index = "Used-housing sale price"
+    )
+  )
+
+plot_housing_timeline <- ggplot(
+  market_long,
+  aes(
+    x = year,
+    y = index,
+    color = indicator,
+    linetype = indicator,
+    group = indicator
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = 2022,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  scale_color_manual(
+    values = c(
+      "Advertised rent" = carabanchel_col,
+      "Used-housing sale price" = dark_col
+    )
+  ) +
+  scale_x_continuous(breaks = 2015:2025) +
+  labs(
+    title = "Housing-market change in Carabanchel",
+    subtitle = "2015 = 100; dashed line marks the end of the common comparison period",
+    x = NULL,
+    y = "Index (2015 = 100)",
+    color = NULL,
+    linetype = NULL
+  ) +
+  theme_report
+
+plot_housing_timeline
+```
+
+Housing-market change continued after 2022, with both advertised rents and used-housing sale prices rising further. The available demographic series also continued to change, particularly through further growth in the foreign-national share and a recovery in the share aged 25–39.
+
+The university-educated share continued to increase as well, but its post-2022 trajectory does not show a marked acceleration compared with the earlier period.
+
+# 2. Narrative Change
+
+Part 2 examines how Carabanchel was represented in newspaper coverage between **2015 and 2025**, and whether the themes and ways of describing the district changed over time.
+
+The corpus was constructed from three news outlets: *El Mundo* (Madrid edition), *El País* (Madrid edition), and *elDiario.es*. Articles were identified through MyNews using the exact term `Carabanchel` in the title or subtitle, with no restriction by news section. This criterion was used to focus the corpus on articles in which Carabanchel was a main subject rather than a passing reference. Because MyNews does not provide large-scale full-text downloads, the articles were collected individually from the available online or print versions, with information cross-checked through MyNews, ProQuest, and the newspapers' own websites where necessary.
+
+Narrative change is examined through several complementary methods. First, the volume and outlet composition of the corpus are described to understand how media attention changed over time. **Lexical analysis** then examines changes in frequently used words and recurring expressions, providing a direct view of shifts in the vocabulary associated with Carabanchel. **Topic modeling** is used to identify broader recurring themes across the full corpus and to examine how their relative prevalence changed between 2015 and 2025. Finally, **qualitative close reading** of representative articles is used to interpret these computational patterns in context, particularly to distinguish articles that merely locate an event in Carabanchel from those that actively describe, evaluate, or construct an image of the district itself.
+
+Using these methods together makes it possible to examine narrative change at different levels: from vocabulary, to broader themes, to the specific ways in which Carabanchel is represented within individual articles.
+
+## 2.1. Corpus construction and preparation
+
+The collected articles are first converted into a consistent document-level dataset for text analysis. Publication dates are standardized, the publication year is extracted, and each article is assigned a unique identifier. The full article text is retained as the main text field, while year and news outlet are kept as document-level metadata for later temporal and outlet-specific comparisons.
+
+The text is then prepared for computational analysis. Standard Spanish stopwords are removed together with a small set of additional high-frequency words that occur frequently in news writing but provide little information about how Carabanchel is represented. `Carabanchel` itself is also excluded from later lexical and topic analyses because it is part of the corpus selection criterion and therefore appears throughout the corpus.
+
+Finally, the full article texts are processed with the Spanish **UDPipe** model. UDPipe tokenises the text, assigns part-of-speech tags, and converts words to their lemmas. Lemmatization groups different grammatical forms of the same word under a common form, making comparisons across articles and years less sensitive to Spanish inflection. The resulting token-level dataset is linked back to each article's year and outlet and saved as a processed file so that the linguistic annotation does not need to be repeated every time the analysis is run.
+
+```{r corpus-import-final, results='hide'}
+news <- read_csv(file.path(raw_dir, "carabanchel_news.csv")) |>
+  mutate(
+    date = parse_date_time(
+      Date,
+      orders = c("dmy", "ymd")
+    ),
+    year = year(date),
+    article_id = row_number(),
+    text = `Full text`
+  )
+```
+
+```{r stopwords-final}
+spanish_stopwords <- tibble(
+  word = stopwords("es", source = "snowball")
+)
+
+custom_stopwords <- tibble(
+  word = c(
+    "madrid", "años", "año", "dos", "tres", "según", "después", "ser", "si", "aunque",
+    "hace", "pasado", "tras", "ahora", "parte", "día", "además", "así", "momento", "número",
+    "ayer", "mientras", "mismo", "todas", "unas", "hacer", "vez", "solo", "allí", "aquí",
+    "haber", "fuentes", "horas", "primero", "último", "mes", "hora", "fuente", "persona",
+    "caso", "hecho"
+  )
+)
+```
+
+```{r udpipe-preparation-final, results='hide'}
+lemma_path <- file.path(processed_dir, "lemma_tokens.rds")
+
+if (file.exists(lemma_path)) {
+  lemma_tokens <- readRDS(lemma_path)
+} else {
+  model_dir <- file.path(processed_dir, "udpipe")
+  dir.create(model_dir, recursive = TRUE, showWarnings = FALSE)
+  spanish_model <- udpipe_download_model(
+    language = "spanish",
+    model_dir = model_dir
+  )
+  ud_model <- udpipe_load_model(spanish_model$file_model)
+
+  annotation <- udpipe_annotate(
+    ud_model,
+    x = news$text,
+    doc_id = news$article_id
+  )
+
+  lemma_tokens <- as_tibble(as.data.frame(annotation))
+  saveRDS(lemma_tokens, lemma_path)
+}
+
+lemma_tokens <- lemma_tokens |>
+  mutate(
+    article_id = as.integer(doc_id),
+    word = str_to_lower(lemma)
+  ) |>
+  left_join(
+    news |>
+      select(article_id, year, Outlet),
+    by = "article_id"
+  )
+```
+
+The final corpus contains **`r nrow(news)` articles** from 2015–2025. Full article text is used locally for analysis but should not be redistributed in a public repository unless the relevant rights allow it. The repository can instead provide collection documentation, metadata where permitted and derived analytical outputs.
+
+## 2.2. Media visibility and outlet composition
+
+Before examining changes in vocabulary or themes, I first describe how the volume and composition of the corpus changed over time.
+
+For each year, the number of articles is counted separately by news outlet, together with the total number of Carabanchel-related articles published that year. This makes it possible to distinguish two different patterns: changes in the overall media visibility of Carabanchel and changes in which outlets contributed most to that coverage.
+
+The figure combines annual article counts by outlet with the total number of articles per year. Changes in article volume are treated only as descriptive context and are not interpreted as narrative change by themselves. The changing outlet composition is also important because differences between newspapers could partly influence the themes observed in the full corpus; this possibility is examined separately in the robustness analysis.
+
+```{r corpus-overview-calculation-final, results='hide'}
+year_outlet <- news |>
+  count(year, Outlet)
+
+year_total <- news |>
+  count(year, name = "total")
+
+outlet_total <- news |>
+  count(Outlet, name = "n") |>
+  arrange(desc(n))
+```
+
+```{r corpus-overview-plot-final, fig.width=10, fig.height=6.2}
+# FIGURE STATUS: SUPPORTING
+plot_corpus_overview <- ggplot(year_outlet, aes(x = year, y = n, fill = Outlet)) +
+  geom_col(width = 0.7) +
+  geom_line(
+    data = year_total,
+    aes(x = year, y = total, group = 1),
+    inherit.aes = FALSE,
+    color = dark_col,
+    linewidth = 0.8
+  ) +
+  geom_point(
+    data = year_total,
+    aes(x = year, y = total),
+    inherit.aes = FALSE,
+    color = dark_col,
+    size = 2
+  ) +
+  geom_text(
+    data = year_total,
+    aes(x = year, y = total, label = total),
+    inherit.aes = FALSE,
+    vjust = -0.7,
+    color = dark_col,
+    size = 3.5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "El Mundo" = red_col,
+      "El País" = yellow_col,
+      "eldiario.es" = blue_col
+    )
+  ) +
+  scale_x_continuous(breaks = 2015:2025) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "News coverage of Carabanchel, 2015–2025",
+    subtitle = "Number of articles retrieved per year and by news outlet",
+    x = NULL,
+    y = "Number of articles",
+    fill = NULL
+  ) +
+  theme_report +
+  theme(panel.grid.major.x = element_blank())
+
+plot_corpus_overview
+```
+
+Coverage was relatively low for much of the late 2010s and increased clearly after 2022. Outlet composition also changes over time, which is why outlet-specific trends are checked separately in the robustness analysis.
+
+## 2.3. Lexical evidence
+
+Lexical analysis is used as a first way of examining whether the vocabulary associated with Carabanchel changed between 2015 and 2025. Three complementary approaches are used.
+
+First, **single-word frequencies** are used to identify broad changes in the vocabulary appearing in the corpus. Second, **bigrams and trigrams** are examined because recurring multi-word expressions provide more context than isolated words. Finally, **TF-IDF** is used as an exploratory diagnostic to identify vocabulary that is particularly distinctive to individual years.
+
+The main interpretation relies on recurring frequency patterns in the single-word and n-gram analyses. TF-IDF is treated more cautiously because distinctive vocabulary in a given year can be strongly influenced by individual events.
+
+### 2.3.1. Single-word trends
+
+For the single-word analysis, I retain lemmatized Spanish **nouns and adjectives**, excluding standard and custom stopwords and the word `Carabanchel` itself.
+
+Because both the number and length of articles vary considerably between years, raw word counts are not directly comparable. Word frequency is therefore normalised as the number of occurrences per 1,000 words in each year. I also calculate the percentage of articles in each year containing each word as a document-frequency check, so that a high frequency is less likely to be interpreted as a general pattern when it is concentrated in only one or two articles.
+
+For the temporal trend analysis, I retain words that appear at least 20 times in the full corpus and in at least five different years. A simple linear trend in normalised frequency is then calculated for each word between 2015 and 2025. The trend line is used descriptively to identify vocabulary that generally became more or less common over the period; it is not interpreted as evidence of a perfectly linear change.
+
+```{r single-word-analysis-final, results='hide'}
+news_tokens_content <- lemma_tokens |>
+  filter(
+    upos %in% c("NOUN", "ADJ"),
+    str_detect(word, "^\\p{L}+$"),
+    str_length(word) > 1
+  ) |>
+  anti_join(spanish_stopwords, by = "word") |>
+  anti_join(custom_stopwords, by = "word") |>
+  filter(word != "carabanchel")
+
+articles_per_year <- news |>
+  count(year, name = "total_articles")
+
+year_total_words <- lemma_tokens |>
+  filter(str_detect(word, "^\\p{L}+$")) |>
+  count(year, name = "total_words")
+
+year_word_freq <- news_tokens_content |>
+  count(year, word, name = "raw_n") |>
+  left_join(year_total_words, by = "year") |>
+  mutate(
+    per_1000 = raw_n / total_words * 1000
+  )
+
+year_word_df <- news_tokens_content |>
+  distinct(year, article_id, word) |>
+  count(year, word, name = "n_articles") |>
+  left_join(articles_per_year, by = "year") |>
+  mutate(
+    doc_percent = n_articles / total_articles * 100
+  )
+
+word_trends <- year_word_freq |>
+  select(year, word, raw_n, per_1000) |>
+  complete(
+    word,
+    year = 2015:2025,
+    fill = list(raw_n = 0, per_1000 = 0)
+  ) |>
+  group_by(word) |>
+  filter(
+    sum(raw_n) >= 20,
+    sum(raw_n > 0) >= 5
+  ) |>
+  summarise(
+    total_n = sum(raw_n),
+    years_present = sum(raw_n > 0),
+    slope = coef(lm(per_1000 ~ year))[2],
+    .groups = "drop"
+  )
+```
+
+```{r single-word-plot-final, fig.width=11.5, fig.height=11}
+increasing_words <- c(
+  "barrio", "nuevo", "espacio", "obra",
+  "proyecto", "vivienda", "artista", "cultural"
+)
+
+decreasing_words <- c(
+  "policía", "agente", "policial", "asesinato",
+  "delito", "denuncia", "niño", "menor"
+)
+
+increase_plot <- year_word_freq |>
+  filter(word %in% increasing_words) |>
+  select(year, word, per_1000) |>
+  complete(
+    word = increasing_words,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+decrease_plot <- year_word_freq |>
+  filter(word %in% decreasing_words) |>
+  select(year, word, per_1000) |>
+  complete(
+    word = decreasing_words,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_words_increasing <- ggplot(
+  increase_plot,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linewidth = 0.6,
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ word, ncol = 4) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Vocabulary increasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_report
+
+plot_words_decreasing <- ggplot(
+  decrease_plot,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linewidth = 0.6,
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ word, ncol = 4) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Vocabulary decreasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_report
+
+plot_single_word_trends <-
+  plot_words_increasing / plot_words_decreasing
+
+plot_single_word_trends
+```
+
+Several words associated with policing and specific incidents, including `policía`, `agente`, `policial`, `asesinato`, and `delito`, generally become less frequent over the period.
+
+By contrast, words including `barrio`, `espacio`, `proyecto`, `vivienda`, `artista`, and `cultural` become more frequent. The single-word results therefore suggest a broad shift in the vocabulary of coverage: policing and incident-related language becomes less dominant, while references to the neighbourhood itself, urban development, housing, and cultural activity become more visible.
+
+These patterns should not yet be interpreted as a direct shift from a negative to a positive image of Carabanchel. Individual words provide limited contextual information, which is why recurring multi-word expressions are examined next.
+
+### 2.3.2. Bigrams and Trigrams
+
+Single words provide only limited information about how vocabulary is used in context. I therefore examine recurring **bigrams and trigrams**: sequences of two and three words occurring within the same sentence.
+
+The analysis uses the lemmatized tokens produced earlier and focuses mainly on noun- and adjective-based expressions. This makes it easier to identify recurring references to institutions, housing, urban development, cultural activity, policing, and other concrete subjects.
+
+Generic expressions with little relevance to neighbourhood representation, such as common time expressions and age references, are removed manually. Because multi-word expressions occur less frequently than individual words, lower inclusion thresholds are used: bigrams must appear at least eight times across at least three years, and trigrams at least six times across at least two years.
+
+As in the single-word analysis, annual frequencies are normalised per 1,000 words, and simple linear trends are used descriptively to identify expressions that generally became more or less common between 2015 and 2025.
+
+```{r ngram-preparation-final, results='hide'}
+ngram_base <- lemma_tokens |>
+  filter(
+    !is.na(word),
+    str_detect(word, "^\\p{L}+$")
+  ) |>
+  mutate(
+    token_id_num = as.integer(token_id)
+  ) |>
+  arrange(article_id, sentence_id, token_id_num)
+
+bigrams <- ngram_base |>
+  group_by(article_id, year, sentence_id) |>
+  mutate(
+    word2 = lead(word),
+    pos2 = lead(upos)
+  ) |>
+  filter(!is.na(word2)) |>
+  ungroup()
+
+trigrams <- ngram_base |>
+  group_by(article_id, year, sentence_id) |>
+  mutate(
+    word2 = lead(word, 1),
+    word3 = lead(word, 2),
+    pos2 = lead(upos, 1),
+    pos3 = lead(upos, 2)
+  ) |>
+  filter(
+    !is.na(word2),
+    !is.na(word3)
+  ) |>
+  ungroup()
+
+bigrams_clean <- bigrams |>
+  filter(
+    upos %in% c("NOUN", "ADJ"),
+    pos2 %in% c("NOUN", "ADJ"),
+    word != "carabanchel",
+    word2 != "carabanchel"
+  ) |>
+  mutate(
+    bigram = str_c(word, word2, sep = " ")
+  )
+
+trigrams_clean <- trigrams |>
+  filter(
+    upos %in% c("NOUN", "ADJ"),
+    pos2 %in% c("NOUN", "ADJ", "ADP", "DET"),
+    pos3 %in% c("NOUN", "ADJ"),
+    word != "carabanchel",
+    word2 != "carabanchel",
+    word3 != "carabanchel"
+  ) |>
+  mutate(
+    trigram = str_c(word, word2, word3, sep = " ")
+  )
+```
+
+Before estimating temporal trends, a small number of generic recurring expressions, mainly time references and age descriptions, were removed manually because they were frequent but provided little information about the representation of Carabanchel.
+
+```{r ngram-filtering-final, results='hide'}
+# Remove generic recurring expressions with little relevance to neighbourhood representation
+
+exclude_bigrams <- c(
+  "último año",
+  "año pasado",
+  "primero vez",
+  "semana pasado",
+  "día siguiente",
+  "pasado mes",
+  "grande dimensión"
+)
+
+exclude_trigrams <- c(
+  "millón de euro",
+  "fin de semana",
+  "hombre de año",
+  "joven de año",
+  "menor de edad",
+  "menor de año",
+  "hijo de año",
+  "mujer de año",
+  "día a día"
+)
+
+bigrams_analysis <- bigrams_clean |>
+  filter(!bigram %in% exclude_bigrams)
+
+trigrams_analysis <- trigrams_clean |>
+  filter(!trigram %in% exclude_trigrams)
+```
+
+```{r ngram-trends-final, results='hide'}
+bigram_year <- bigrams_analysis |>
+  count(year, bigram, name = "n") |>
+  left_join(year_total_words, by = "year") |>
+  mutate(
+    per_1000 = n / total_words * 1000
+  )
+
+bigram_trends <- bigram_year |>
+  select(year, bigram, n, per_1000) |>
+  complete(
+    bigram,
+    year = 2015:2025,
+    fill = list(n = 0, per_1000 = 0)
+  ) |>
+  group_by(bigram) |>
+  filter(
+    sum(n) >= 8,
+    sum(n > 0) >= 3
+  ) |>
+  summarise(
+    total_n = sum(n),
+    years_present = sum(n > 0),
+    slope = coef(lm(per_1000 ~ year))[2],
+    .groups = "drop"
+  )
+
+trigram_year <- trigrams_analysis |>
+  count(year, trigram, name = "n") |>
+  left_join(year_total_words, by = "year") |>
+  mutate(
+    per_1000 = n / total_words * 1000
+  )
+
+trigram_trends <- trigram_year |>
+  select(year, trigram, n, per_1000) |>
+  complete(
+    trigram,
+    year = 2015:2025,
+    fill = list(n = 0, per_1000 = 0)
+  ) |>
+  group_by(trigram) |>
+  filter(
+    sum(n) >= 6,
+    sum(n > 0) >= 2
+  ) |>
+  summarise(
+    total_n = sum(n),
+    years_present = sum(n > 0),
+    slope = coef(lm(per_1000 ~ year))[2],
+    .groups = "drop"
+  )
+```
+
+```{r bigram-selection-final, echo=FALSE}
+increasing_bigrams <- c(
+  "metro cuadrado",
+  "espacio público",
+  "uso residencial",
+  "interés cultural",
+  "movimiento vecinal",
+  "asociación vecinal"
+)
+
+decreasing_bigrams <- c(
+  "policía nacional",
+  "policía municipal",
+  "fuente policial",
+  "arma blanco"
+)
+```
+
+```{r bigram-increasing-plot-final, include=FALSE}
+bigram_plot_data <- bigram_year |>
+  filter(bigram %in% increasing_bigrams) |>
+  select(year, bigram, per_1000) |>
+  complete(
+    bigram = increasing_bigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_bigrams_increasing <- ggplot(
+  bigram_plot_data,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ bigram, ncol = 3) +
+  scale_x_continuous(
+    breaks = c(2015, 2020, 2025)
+  ) +
+  labs(
+    title = "Selected bigrams increasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_report +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_bigrams_increasing
+```
+
+```{r bigram-decreasing-plot-final, include=FALSE}
+bigram_plot_data_down <- bigram_year |>
+  filter(bigram %in% decreasing_bigrams) |>
+  select(year, bigram, per_1000) |>
+  complete(
+    bigram = decreasing_bigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_bigrams_decreasing <- ggplot(
+  bigram_plot_data_down,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ bigram, ncol = 2) +
+  scale_x_continuous(
+    breaks = c(2015, 2020, 2025)
+  ) +
+  labs(
+    title = "Selected bigrams decreasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_report +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_bigrams_decreasing
+```
+
+```{r bigram-plot-final, echo=FALSE, fig.width=11.5, fig.height=9}
+plot_bigram_trends <-
+  plot_bigrams_increasing /
+  plot_bigrams_decreasing
+
+plot_bigram_trends
+```
+
+```{r trigram-selection-final, echo=FALSE}
+increasing_trigrams <- c(
+  "galería de arte",
+  "sindicato de vivienda",
+  "centro de memoria",
+  "proyecto de urbanización",
+  "fondo de inversión",
+  "bloque de vivienda"
+)
+
+decreasing_trigrams <- c(
+  "arma de fuego",
+  "año de prisión",
+  "robo con violencia",
+  "violencia de género"
+)
+```
+
+```{r trigram-increasing-plot-final, include=FALSE}
+trigram_plot_data <- trigram_year |>
+  filter(trigram %in% increasing_trigrams) |>
+  select(year, trigram, per_1000) |>
+  complete(
+    trigram = increasing_trigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_trigrams_increasing <- ggplot(
+  trigram_plot_data,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ trigram, ncol = 3) +
+  scale_x_continuous(
+    breaks = c(2015, 2020, 2025)
+  ) +
+  labs(
+    title = "Selected trigrams increasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_report +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_trigrams_increasing
+```
+
+```{r trigram-decreasing-plot-final, include=FALSE}
+trigram_plot_data_down <- trigram_year |>
+  filter(trigram %in% decreasing_trigrams) |>
+  select(year, trigram, per_1000) |>
+  complete(
+    trigram = decreasing_trigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_trigrams_decreasing <- ggplot(
+  trigram_plot_data_down,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ trigram, ncol = 2) +
+  scale_x_continuous(
+    breaks = c(2015, 2020, 2025)
+  ) +
+  labs(
+    title = "Selected trigrams decreasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_report +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_trigrams_decreasing
+```
+
+```{r trigram-plot-final, echo=FALSE, fig.width=11.5, fig.height=9}
+plot_trigram_trends <-
+  plot_trigrams_increasing /
+  plot_trigrams_decreasing
+
+plot_trigram_trends
+```
+
+The n-gram analysis supports the broad pattern observed in the single-word results.
+
+Expressions related to policing and crime, including `policía nacional`, `policía municipal`, `fuente policial`, and `arma de fuego`, are generally more prominent in earlier years.
+
+In later years, recurring expressions related to housing and urban development become more visible, including `metro cuadrado`, `uso residencial`, `sindicato de vivienda`, `proyecto de urbanización`, `fondo de inversión`, and `bloque de vivienda`. Cultural expressions such as `galería de arte` and `interés cultural` also become more visible.
+
+The lexical change therefore appears not only in isolated words but also in recurring expressions. However, individual n-grams can still be influenced by particular events, organisations, or projects. These results are therefore interpreted as evidence of changing patterns in news vocabulary rather than as direct evidence of a uniform change in the image of Carabanchel.
+
+### 2.3.3. TF-IDF as an exploratory check
+
+As an additional exploratory analysis, I calculate TF-IDF by year. Unlike the frequency analyses above, TF-IDF gives greater weight to words that are unusually distinctive to a particular year relative to the rest of the corpus.
+
+To reduce the influence of extremely rare terms, only words appearing at least 10 times in the full corpus are retained. The highest-scoring terms for each year are then inspected.
+
+This analysis is used mainly as a diagnostic rather than as a central measure of narrative change. A word can receive a high TF-IDF score because of a single major event in a particular year, even if it does not represent a longer-term change in the way Carabanchel is discussed.
+
+```{r tfidf-final, results='hide'}
+year_tfidf <- news_tokens_content |>
+  count(year, word, name = "n") |>
+  bind_tf_idf(
+    term = word,
+    document = year,
+    n = n
+  )
+
+word_totals <- news_tokens_content |>
+  count(word, name = "total_n")
+
+year_tfidf <- year_tfidf |>
+  left_join(word_totals, by = "word") |>
+  filter(total_n >= 10)
+
+top_tfidf_plot <- year_tfidf |>
+  group_by(year) |>
+  slice_max(tf_idf, n = 5, with_ties = FALSE) |>
+  ungroup() |>
+  mutate(
+    word_year = reorder_within(word, tf_idf, year)
+  )
+```
+
+```{r tfidf-plot-final, echo=FALSE, fig.width=11.5, fig.height=9}
+plot_tfidf <- ggplot(
+  top_tfidf_plot,
+  aes(x = tf_idf, y = word_year)
+) +
+  geom_col() +
+  scale_y_reordered() +
+  facet_wrap(
+    ~ year,
+    scales = "free_y",
+    ncol = 4
+  ) +
+  labs(
+    title = "Distinctive vocabulary by year",
+    subtitle = "Top TF-IDF terms for each year",
+    x = "TF-IDF",
+    y = NULL
+  ) +
+  theme_report +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_tfidf
+```
+
+TF-IDF shows substantial year-to-year variation in distinctive vocabulary, confirming that individual events can strongly shape annual news coverage. For example, `test` and `coronavirus` are particularly distinctive in 2020.
+
+At the same time, some of the results are consistent with the longer-term frequency analysis. Earlier years contain several distinctive terms associated with crime and specific incidents, while `mural` and `arte` appear among the distinctive vocabulary in 2025.
+
+TF-IDF therefore provides useful supporting context, but the stronger evidence for longer-term lexical change comes from the normalized single-word and n-gram trends, which track recurring vocabulary across multiple years.
+
+## 2.4. Topic modeling and prevalence over time
+
+The lexical analysis identifies changes in particular words and recurring expressions, but it does not directly show how these terms combine into broader themes across complete articles. I therefore use topic modeling to identify recurring thematic structures in the corpus and examine how the relative prominence of these themes changes between 2015 and 2025.
+
+For the topic model, the lemmatized text is restricted to **nouns, adjectives, and verbs**, which retain most of the substantive content of the articles. Standard Spanish stopwords, the additional custom stopwords defined earlier, and a small set of very common verbs with little thematic value are removed. `Carabanchel` is also excluded because its high frequency is partly determined by the corpus-selection procedure. Terms appearing in fewer than five articles are removed to reduce the influence of very rare vocabulary.
+
+Each article is then represented as a document in a document-feature matrix and analysed using a **Structural Topic Model (STM)**. Rather than assigning each article to a single topic, the model estimates a proportion for every topic within every article. An article can therefore contain, for example, both housing and policing content in different proportions.
+
+The number of topics was not fixed in advance. Candidate solutions with 5, 7, 9, 11, and 13 topics were compared during model development using STM diagnostics and substantive interpretability. The 7- and 9-topic solutions were inspected more closely, and the **9-topic solution** was retained because it provided greater thematic differentiation while remaining interpretable. The full topic-number sensitivity check is reported separately in the robustness analysis.
+
+Topic labels are not generated automatically by the model. They are assigned after examining the highest-probability terms and the articles with the highest estimated proportion for each topic. The labels are therefore descriptive interpretations of the content grouped by the model.
+
+Finally, topic prevalence over time is calculated from the estimated topic proportions. For each year, I take the mean proportion of each topic across all articles published in that year. These yearly averages indicate how prominent each theme was within the coverage of that year. They are interpreted as changes in the overall mix of news coverage rather than as a smooth or necessarily linear measure of narrative change, since individual events can produce substantial yearly peaks.
+
+```{r topic-stopwords-final}
+topic_stopwords <- tibble(
+  word = c(
+    "tener", "poder", "hacer", "decir", "dar",
+    "ir", "llegar", "ver", "encontrar", "llevar",
+    "contar", "explicar", "pasar", "seguir",
+    "querer", "dejar", "poner", "salir",
+    "venir", "quedar", "saber"
+  )
+)
+```
+
+```{r topic-model-tokens-final, results='hide'}
+topic_tokens <- lemma_tokens |>
+  filter(
+    upos %in% c("NOUN", "ADJ", "VERB"),
+    str_detect(word, "^\\p{L}+$"),
+    str_length(word) > 1
+  ) |>
+  anti_join(spanish_stopwords, by = "word") |>
+  anti_join(custom_stopwords, by = "word") |>
+  anti_join(topic_stopwords, by = "word") |>
+  filter(word != "carabanchel")
+```
+
+```{r topic-texts-final, results='hide'}
+topic_texts <- topic_tokens |>
+  group_by(article_id) |>
+  summarise(
+    text = str_c(word, collapse = " "),
+    .groups = "drop"
+  ) |>
+  left_join(
+    news |>
+      select(article_id, year, Outlet),
+    by = "article_id"
+  )
+
+# Keep year and outlet as document-level metadata.
+topic_corpus <- corpus(
+  topic_texts,
+  text_field = "text",
+  docid_field = "article_id"
+)
+
+topic_dfm <- tokens(topic_corpus) |>
+  dfm() |>
+  dfm_trim(
+    min_docfreq = 5,
+    docfreq_type = "count"
+  )
+
+stm_input <- convert(
+  topic_dfm,
+  to = "stm"
+)
+```
+
+```{r stm-nine-topic-final, results='hide'}
+set.seed(1234)
+
+stm_9 <- stm(
+  documents = stm_input$documents,
+  vocab = stm_input$vocab,
+  K = 9,
+  init.type = "Spectral",
+  max.em.its = 100
+)
+```
+
+```{r topic-labels-final}
+topic_labels <- c(
+  "Cultural and leisure events",
+  "Urban redevelopment, heritage and land use",
+  "Education and social vulnerability",
+  "Arts, lifestyle and neighbourhood revaluation",
+  "Municipal governance, mobility and public space",
+  "Prison, memory and historical repression",
+  "Housing conflict, rent and displacement",
+  "Health and local public services",
+  "Crime, policing and emergencies"
+)
+```
+
+```{r topic-proportions-final, results='hide'}
+theta_df <- as_tibble(stm_9$theta)
+names(theta_df) <- paste0("topic_", 1:9)
+
+theta_df <- theta_df |>
+  mutate(doc_index = row_number()) |>
+  bind_cols(
+    stm_input$meta |>
+      select(year, Outlet)
+  )
+
+theta_long <- theta_df |>
+  pivot_longer(
+    cols = starts_with("topic_"),
+    names_to = "topic",
+    values_to = "proportion"
+  ) |>
+  mutate(
+    topic_number = as.integer(str_remove(topic, "topic_")),
+    topic_label = factor(
+      topic_number,
+      levels = 1:9,
+      labels = topic_labels
+    )
+  )
+```
+
+```{r topic-prevalence-calculation-final, results='hide'}
+topic_year <- theta_long |>
+  group_by(year, topic_number, topic_label) |>
+  summarise(
+    mean_proportion = mean(proportion),
+    .groups = "drop"
+  )
+```
+
+```{r topic-prevalence-plot-final, fig.width=11.5, fig.height=9}
+# FIGURE STATUS: THESIS
+plot_topic_prevalence <- ggplot(
+  topic_year,
+  aes(x = year, y = mean_proportion)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  facet_wrap(
+    ~ topic_label,
+    ncol = 3,
+    scales = "free_y"
+  ) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Topic prevalence over time",
+    subtitle = "Average topic proportion in articles, 2015–2025",
+    x = NULL,
+    y = "Average topic proportion"
+  ) +
+  theme_report +
+  theme(strip.text = element_text(face = "bold"))
+
+plot_topic_prevalence
+```
+
+The topic trends are uneven rather than linear. Crime, policing and emergency coverage is especially prominent in the earlier years but remains present throughout the study period. Arts, lifestyle and neighbourhood-revaluation coverage becomes more visible from the late 2010s and is particularly prominent in the later years. Urban redevelopment, land use, and housing conflict also become more visible in several post-2020 years.
+
+## 2.5. What close reading changes
+
+Computational patterns alone cannot show whether an article actually frames Carabanchel itself in a particular way. Close reading is therefore used to examine how the district is represented within individual articles, particularly whether Carabanchel is merely the location of an event or is actively described, evaluated, and interpreted as a place.
+
+The close reading focuses on three topics that are especially relevant to the research question and that capture contrasting forms of representation: **arts, lifestyle and neighbourhood revaluation (Topic 4), housing conflict, rent and displacement (Topic 7), and crime, policing and emergencies (Topic 9)**. Together, these topics make it possible to compare emerging cultural and revaluation narratives with housing-related pressures and the incident-based coverage that is more prominent in the earlier corpus.
+
+To select articles systematically, I first identify the articles with the highest estimated topic proportion for each of these three topics. These high-probability articles are treated as representative examples of the thematic content identified by the STM rather than being selected only because they contain particularly striking language.
+
+The selected articles are then read in full, focusing on three questions: how Carabanchel is represented, who the main actors are, and what language or framing is used. This qualitative step is used to interpret the computational results and to distinguish changes in topic prevalence from changes in the way the district itself is described.
+
+| Period / topic | Example | What it adds to the interpretation |
+|:-----------------------|:-----------------------|:-----------------------|
+| 2016 · crime/policing | *El parricida de Carabanchel…* | Carabanchel is mainly the location attached to an incident; the district itself is barely characterised. |
+| 2020 · housing conflict | *La presión vecinal… fuerza a la Sareb a parar un desalojo* | Housing appears as a conflict over residential stability, eviction and property ownership. |
+| 2021 · arts/revaluation | *Una galería… para la nueva meca del arte contemporáneo* | One of the clearest early articles explicitly describing a working-class/industrial district as a new art centre. |
+| 2024 · arts/lifestyle | *Una forma de capear la precariedad en la hostelería* | Carabanchel is attractive partly because it is still framed as affordable and authentic relative to central Madrid. |
+| 2025 · arts/lifestyle | *El 'boom' gastro de Carabanchel* | Strong place-revaluation frame: cultural/gastronomic destination, while retaining references to its popular identity. |
+| 2025 · crime/emergency | *Cinco personas rajan la cara…* | Event-based crime reporting persists; the later narrative does not simply replace the earlier one. |
+
+The main distinction is important. Many earlier crime-related articles attach the place name Carabanchel to an incident without explicitly describing the district as dangerous. Later cultural and lifestyle articles more often describe Carabanchel itself as **creative, attractive, authentic or undergoing change**. Housing coverage is more mixed and includes vulnerability, eviction, high rents, new development and unequal access.
+
+The narrative result is therefore best described as a **broadening of representation**. Carabanchel increasingly appears not only as the location of news events, but as a place with an identity that is itself discussed and interpreted.
+
+# 3. Synthesis of Material and Narrative Change
+
+Taken together, the two parts show that different dimensions of change in Carabanchel have developed with very different strengths. The material analysis shows substantial demographic growth and strong housing-market pressure, but much weaker district-wide socioeconomic upgrading. At the same time, the narrative analysis shows a broader and increasingly place-focused representation of Carabanchel, including greater attention to culture, housing, redevelopment, and neighbourhood identity.
+
+| Dimension | Main evidence | Interpretation |
+|:-----------------------|:-----------------------|:-----------------------|
+| Demographic change | Strong population growth and a relatively large increase in the foreign-national share, while the share aged 25-39 shows a different pattern | Substantial change but not a uniform shift across all indicators |
+| Socioeconomic change | Income growth ranks 21st, university-education growth 18th, and higher occupational-status growth 19th | Limited district-wide upgrading relative to the rest of Madrid |
+| Housing market | Advertised-rent growth ranks 5th; rent and sale prices continue to rise after 2022 | Strong and continuing housing-market pressure |
+| News representation | Later coverage gives greater visibility to discusses culture, housing, redevelopment, and neighborhood identity | Broader and more place-focused narrative |
+
+The distinctive pattern is therefore not simply that Carabanchel has or has not "gentrified". The district has experienced population growth, substantial housing-market pressure, and an increasingly visible symbolic revaluation, without a comparable district-wide rise in the socioeconomic status of its residents.
+
+This combination is better understood as an **uneven and partly decoupled process of urban change with a strong housing-market component**. Housing prices and rents have risen rapidly, and the ways in which Carabanchel is represented are also changing, while the available income, education, and occupational indicators show much weaker relative socioeconomic change.
+
+The narrative findings add an important dimension to this pattern. Later media coverage increasingly treats Carabanchel as a place with a changing cultural, residential, and neighbourhood identity, even though the district-level socioeconomic indicators do not show equally strong upgrading. In this sense, changes in housing conditions, demographic composition, socioeconomic status, and place representation appear to be developing unevenly rather than as one uniform process.
+
+The analysis does not establish a causal or sequential relationship between these dimensions. Instead, it shows that recent urban change in Carabanchel is **multidimensional and uneven**, and that focusing on only one indicator would miss an important part of that process.
+
+# 4. Robustness Checks
+
+Robustness checks are kept in `analysis/Rmd/03_robustness_checks.Rmd` so that they do not interrupt the main analytical flow.
+
+They cover three issues:
+
+1.  **Occupational-status definition:** whether Carabanchel's low relative occupational upgrading depends on the exact definition of higher occupational status.
+2.  **Topic-number sensitivity:** whether the substantive narrative structure depends strongly on choosing nine topics.
+3.  **Outlet effect:** whether the topic shift seen in the full corpus also appears within individual outlets, rather than being produced only by changes in outlet composition.
+
+The outlet check is especially important because the three newspapers are not equally represented over time. It keeps the same 9-topic solution and recalculates prevalence within each outlet, allowing directly comparable within-outlet trends.
+
+# 5. Limitations
+
+The analysis supports a cautious interpretation rather than a definitive classification of Carabanchel as "gentrified".
+
+- **Different time windows:** the common cross-district socioeconomic comparison ends in 2022, while housing extensions and the narrative corpus continue later. Claims are therefore kept within the periods actually observed.
+- **District aggregation:** Carabanchel is a large and internally heterogeneous district. Cultural and housing change may be concentrated in particular barrios or streets, while district-wide averages blend those pockets with the rest of the district.
+- **Stock indicators:** district-level population stocks can identify compositional change but cannot directly establish residential replacement or displacement.
+- **Housing measures:** advertised rents and sale prices measure market change but do not directly measure household housing-cost burden.
+- **Media corpus:** outlet composition changes over time, annual topic proportions can be affected by specific events, and news representation is not equivalent to public opinion.
+
+# 6. Overall Conclusion
+
+Across the study period, Carabanchel experienced substantial demographic change, strong housing-market pressure, and an increasingly visible and place-focused media narrative. At the same time, the 2015–2022 cross-district comparison shows comparatively limited growth in income, university education, and higher occupational status.
+
+Taken together, these findings point to an **uneven and partly decoupled process of urban change with a strong housing-market component**. Carabanchel has become more expensive and has attracted a growing population, while its socioeconomic composition has changed much less strongly relative to other Madrid districts.
+
+The narrative analysis adds another dimension to this pattern. Later coverage increasingly discusses Carabanchel not only as the location of events, but as a neighbourhood with a changing cultural, residential, and symbolic identity.
+
+Overall, the case shows that housing-market change, demographic change, socioeconomic upgrading, and place representation do not necessarily develop in the same way or with the same intensity. Understanding Carabanchel therefore requires considering these dimensions together rather than reducing its recent transformation to a single measure of gentrification.

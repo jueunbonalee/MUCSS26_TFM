@@ -1,0 +1,1270 @@
+---
+title: "Part 2 — Narrative Change in Carabanchel"
+author: "Jueun Lee"
+date: "12 September 2026"
+knit: (function(inputFile, encoding) { outputDir <- file.path(dirname(inputFile), "..", "html"); dir.create(outputDir, recursive = TRUE, showWarnings = FALSE); rmarkdown::render(inputFile, encoding = encoding, output_dir = outputDir) })
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+find_project_root <- function(start = getwd()) {
+  current <- normalizePath(start, winslash = "/", mustWork = TRUE)
+
+  repeat {
+    if (
+      dir.exists(file.path(current, "data", "raw")) &&
+      dir.exists(file.path(current, "report"))
+    ) {
+      return(current)
+    }
+
+    parent <- dirname(current)
+    if (identical(parent, current)) {
+      stop("Cannot locate the MUCSS26_TFM project root.")
+    }
+    current <- parent
+  }
+}
+
+project_root <- find_project_root()
+knitr::opts_knit$set(root.dir = project_root)
+
+raw_dir <- file.path(project_root, "data", "raw")
+processed_dir <- file.path(project_root, "data", "processed")
+figures_dir <- file.path(project_root, "figures")
+
+dir.create(processed_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  include = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "95%",
+  fig.retina = 2
+)
+```
+
+```{=html}
+<style>
+.main-container {
+  max-width: 1200px;
+}
+
+table {
+  font-size: 0.90em;
+}
+</style>
+```
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(tidytext)
+library(stopwords)
+library(udpipe)
+library(stm)
+library(quanteda)
+library(purrr)
+library(patchwork)
+```
+
+```{r plot-settings}
+dark_col <- "#444444"
+red_col <- "#C44E52"
+yellow_col <- "#D9A441"
+blue_col <- "#4C78A8"
+
+theme_report <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 16),
+    plot.subtitle = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+```
+
+# 0. Scope and Analytical Strategy
+
+This working file contains the full analysis for **Part 2 — Narrative Change**. It examines how Carabanchel was represented in news coverage between **2015 and 2025**.
+
+The narrative analysis follows four stages:
+
+1. **Corpus overview:** describe the volume and outlet composition of the collected news corpus.
+2. **Lexical analysis:** examine changes in individual words and recurring expressions over time. TF-IDF is retained as an exploratory analysis but is not treated as a main result.
+3. **Topic modeling:** identify recurring themes and examine changes in their prevalence across the period.
+4. **Qualitative close reading:** inspect representative articles to distinguish simple event-location references from articles that actively describe or interpret Carabanchel as a place.
+
+The main analysis uses a **9-topic STM solution**. Model-number sensitivity and outlet-specific topic trends are kept separate as robustness checks rather than mixed into the main working analysis.
+
+# 1. Corpus Construction and Text Preparation
+
+## 1.1. Data collection
+
+The corpus covers **1 January 2015 to 31 December 2025** and includes three news outlets:
+
+- *El Mundo* (Ed. Madrid)
+- *El País* (Ed. Madrid)
+- *elDiario.es*
+
+Articles were identified through **MyNews** using the exact phrase `Carabanchel` in the **title or subtitle**. All sections were included. Restricting the search to titles and subtitles kept the corpus focused on articles in which Carabanchel was a main subject rather than only a passing reference.
+
+Because MyNews does not support large-scale full-text downloading, articles were collected individually using the available online or print versions. For each article, the dataset records the date, headline, lead/subtitle, full text, author and outlet. Where necessary, article information was checked across MyNews, ProQuest Central Premium and the official newspaper websites.
+
+The full-text corpus is used locally for analysis. It should not be committed to a public repository unless redistribution rights allow it; the public repository can instead document the collection procedure and provide non-copyright-restricted metadata or derived outputs.
+
+## 1.2. Load corpus and metadata
+
+```{r corpus-import, results='hide'}
+news <- read_csv(file.path(raw_dir, "carabanchel_news.csv")) |>
+  mutate(
+    date = parse_date_time(
+      Date,
+      orders = c("dmy", "ymd")
+    ),
+    year = year(date),
+    article_id = row_number(),
+    text = `Full text`
+  )
+```
+
+```{r stopwords}
+spanish_stopwords <- tibble(
+  word = stopwords("es", source = "snowball")
+)
+
+custom_stopwords <- tibble(
+  word = c(
+    "madrid", "años", "año", "dos", "tres", "según", "después", "ser", "si", "aunque",
+    "hace", "pasado", "tras", "ahora", "parte", "día", "además", "así", "momento", "número",
+    "ayer", "mientras", "mismo", "todas", "unas", "hacer", "vez", "solo", "allí", "aquí",
+    "haber", "fuentes", "horas", "primero", "último", "mes", "hora", "fuente", "persona",
+    "caso", "hecho"
+  )
+)
+```
+
+## 1.3. Spanish lemmatization
+
+The analysis uses UDPipe to obtain Spanish lemmas and part-of-speech tags. Because annotation is relatively slow, the annotated tokens are stored as an RDS file and reused on subsequent runs. If the saved file is absent, the code below downloads the Spanish UDPipe model, annotates the corpus and saves the result.
+
+```{r udpipe-preparation, results='hide'}
+lemma_path <- file.path(processed_dir, "lemma_tokens.rds")
+
+if (file.exists(lemma_path)) {
+  lemma_tokens <- readRDS(lemma_path)
+} else {
+  model_dir <- file.path(processed_dir, "udpipe")
+  dir.create(model_dir, recursive = TRUE, showWarnings = FALSE)
+  spanish_model <- udpipe_download_model(
+    language = "spanish",
+    model_dir = model_dir
+  )
+  ud_model <- udpipe_load_model(spanish_model$file_model)
+
+  annotation <- udpipe_annotate(
+    ud_model,
+    x = news$text,
+    doc_id = news$article_id
+  )
+
+  lemma_tokens <- as_tibble(as.data.frame(annotation))
+  saveRDS(lemma_tokens, lemma_path)
+}
+
+lemma_tokens <- lemma_tokens |>
+  mutate(
+    article_id = as.integer(doc_id),
+    word = str_to_lower(lemma)
+  ) |>
+  left_join(
+    news |>
+      select(article_id, year, Outlet),
+    by = "article_id"
+  )
+```
+
+# 2. Corpus Overview
+
+The corpus overview describes **media visibility and outlet composition**, not narrative valence. An increase in the number of articles does not by itself mean that Carabanchel was represented more positively or as more culturally valuable.
+
+```{r corpus-overview-calculation, results='hide'}
+year_outlet <- news |>
+  count(year, Outlet)
+
+year_total <- news |>
+  count(year, name = "total")
+
+outlet_total <- news |>
+  count(Outlet, name = "n") |>
+  arrange(desc(n))
+```
+
+<!-- FIGURE STATUS: SUPPORTING -->
+
+```{r corpus-overview-plot, fig.width=10, fig.height=6.2}
+plot_corpus_overview <- ggplot(year_outlet, aes(x = year, y = n, fill = Outlet)) +
+  geom_col(width = 0.7) +
+  geom_line(
+    data = year_total,
+    aes(x = year, y = total, group = 1),
+    inherit.aes = FALSE,
+    color = dark_col,
+    linewidth = 0.8
+  ) +
+  geom_point(
+    data = year_total,
+    aes(x = year, y = total),
+    inherit.aes = FALSE,
+    color = dark_col,
+    size = 2
+  ) +
+  geom_text(
+    data = year_total,
+    aes(x = year, y = total, label = total),
+    inherit.aes = FALSE,
+    vjust = -0.7,
+    color = dark_col,
+    size = 3.5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "El Mundo" = red_col,
+      "El País" = yellow_col,
+      "eldiario.es" = blue_col
+    )
+  ) +
+  scale_x_continuous(breaks = 2015:2025) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    title = "News coverage of Carabanchel, 2015–2025",
+    subtitle = "Number of articles retrieved per year and by news outlet",
+    x = NULL,
+    y = "Number of articles",
+    fill = NULL
+  ) +
+  theme_report +
+  theme(panel.grid.major.x = element_blank())
+
+plot_corpus_overview
+```
+
+The final corpus contains **`r nrow(news)` articles**. Coverage was relatively low during much of 2016–2021 and increased clearly from 2022 onwards.
+
+The outlets are not equally represented, and their relative contribution also changes over time. This composition issue motivates a separate **within-outlet robustness check**; it is not treated as part of the main narrative result here.
+
+# 3. Lexical Change
+
+## 3.1. Single-word trends
+
+To examine changes in vocabulary, I focus on lemmatized Spanish **nouns and adjectives**. Spanish stopwords, additional high-frequency terms with little analytical meaning, and `Carabanchel` itself are excluded.
+
+```{r single-word-preprocessing, include=TRUE, echo=TRUE, results='hide'}
+news_tokens_content <- lemma_tokens |>
+  filter(
+    upos %in% c("NOUN", "ADJ"),
+    str_detect(word, "^\\p{L}+$"),
+    str_length(word) > 1
+  ) |>
+  anti_join(spanish_stopwords, by = "word") |>
+  anti_join(custom_stopwords, by = "word") |>
+  filter(word != "carabanchel")
+```
+
+<!-- (Normalized) raw frequency -->
+
+Because the number and length of articles vary by year, raw word counts are not directly comparable. I therefore calculated **normalized frequency**, expressed as the number of occurrences per 1,000 words in each year.
+
+I also calculated **document frequency**: the percentage of articles in a given year that contained each word. This provides a simple check that a frequent word is not driven by only one or two articles.
+
+```{r work-01}
+articles_per_year <- news |>
+  count(year, name = "total_articles")
+```
+
+```{r single-word-frequency, include=TRUE, echo=TRUE, results='hide'}
+year_total_words <- lemma_tokens |>
+  filter(
+    str_detect(word, "^\\p{L}+$")
+  ) |>
+  count(year, name = "total_words")
+
+year_word_freq <- news_tokens_content |>
+  count(year, word, name = "raw_n") |>
+  left_join(year_total_words, by = "year") |>
+  mutate(
+    per_1000 = raw_n / total_words * 1000
+  )
+
+year_word_df <- news_tokens_content |>
+  distinct(year, article_id, word) |>
+  count(year, word, name = "n_articles") |>
+  left_join(articles_per_year, by = "year") |>
+  mutate(
+    doc_percent = n_articles / total_articles * 100
+  )
+```
+
+```{r work-02}
+top_freq_year <- year_word_freq |>
+  group_by(year) |>
+  slice_max(per_1000, n = 10, with_ties = FALSE) |>
+  arrange(year, desc(per_1000))
+
+top_freq_year
+```
+
+<!-- Document frequency -->
+
+```{r work-03}
+top_df_year <- year_word_df |>
+  group_by(year) |>
+  slice_max(doc_percent, n = 10, with_ties = FALSE) |>
+  arrange(year, desc(doc_percent))
+
+top_df_year
+```
+
+<!-- Trend & Visualization -->
+
+To focus on recurring vocabulary rather than isolated mentions, I restricted the trend analysis to words that appeared at least 20 times in the full corpus and in at least five different years.
+
+For each word, I estimated a simple linear trend in normalized frequency from 2015 to 2025. The plots below show a small selection of words with clear upward or downward patterns that are relevant to the interpretation of Carabanchel's changing representation. The dashed lines show the overall linear trend.
+
+```{r single-word-trend-selection, include=TRUE, echo=TRUE, results='hide'}
+word_trends <- year_word_freq |>
+  select(year, word, raw_n, per_1000) |>
+  complete(
+    word,
+    year = 2015:2025,
+    fill = list(raw_n = 0, per_1000 = 0)
+  ) |>
+  group_by(word) |>
+  filter(
+    sum(raw_n) >= 20,
+    sum(raw_n > 0) >= 5
+  ) |>
+  summarise(
+    total_n = sum(raw_n),
+    years_present = sum(raw_n > 0),
+    slope = coef(lm(per_1000 ~ year))[2],
+    .groups = "drop"
+  )
+```
+
+```{r work-04}
+word_trends |>
+  arrange(desc(slope)) |>
+  slice_head(n = 15)
+
+word_trends |>
+  arrange(slope) |>
+  slice_head(n = 15)
+```
+
+```{r work-05}
+increasing_words <- c(
+  "barrio",
+  "nuevo",
+  "espacio",
+  "obra",
+  "proyecto",
+  "vivienda",
+  "artista",
+  "cultural"
+)
+
+increase_plot <- year_word_freq |>
+  filter(word %in% increasing_words) |>
+  select(year, word, per_1000) |>
+  complete(
+    word = increasing_words,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_words_increasing <- ggplot(increase_plot, aes(x = year, y = per_1000)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linewidth = 0.6,
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ word, ncol = 4) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Vocabulary increasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_words_increasing
+```
+
+```{r work-06}
+decreasing_words <- c(
+  "policía",
+  "agente",
+  "policial",
+  "asesinato",
+  "delito",
+  "denuncia",
+  "niño",
+  "menor"
+)
+
+decrease_plot <- year_word_freq |>
+  filter(word %in% decreasing_words) |>
+  select(year, word, per_1000) |>
+  complete(
+    word = decreasing_words,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_words_decreasing <- ggplot(decrease_plot, aes(x = year, y = per_1000)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linewidth = 0.6,
+    linetype = "dashed"
+  ) +
+  facet_wrap(~ word, ncol = 4) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Vocabulary decreasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_words_decreasing
+```
+
+<!-- FIGURE STATUS: SUPPORTING -->
+
+```{r single-word-plot-final, include=TRUE, fig.width=11.5, fig.height=11}
+plot_single_word_trends <- plot_words_increasing / plot_words_decreasing
+plot_single_word_trends
+```
+
+Several words associated with policing and specific incidents, such as *`policía`*, *`agente`*, *`asesinato`*, and *`delito`*, generally became less frequent over time.
+
+In contrast, words such as *`barrio`*, *`espacio`*, *`proyecto`*, *`vivienda`*, *`artista`*, and *`cultural`* became more frequent. Taken together, these patterns suggest a shift from more incident-based coverage towards greater attention to the neighbourhood itself, urban development, housing, and cultural activity.
+
+
+## 3.2. Bigrams and Trigrams
+
+Single words can show broad changes in vocabulary, but they do not always reveal how words are used together. I therefore examined recurring two-word and three-word expressions within each sentence.
+
+The analysis uses lemmatized tokens and focuses mainly on noun- and adjective-based expressions. This helps identify recurring references to places, institutions, housing, policing, cultural activity, and other concrete subjects in the coverage.
+
+```{r work-07}
+ngram_base <- lemma_tokens |>
+  filter(
+    !is.na(word),
+    str_detect(word, "^\\p{L}+$")
+  ) |>
+  mutate(
+    token_id_num = as.integer(token_id)
+  ) |>
+  arrange(article_id, sentence_id, token_id_num)
+```
+
+<!-- Bigram -->
+
+```{r work-08}
+bigrams <- ngram_base |>
+  group_by(article_id, year, sentence_id) |>
+  mutate(
+    word2 = lead(word),
+    pos2 = lead(upos)
+  ) |>
+  filter(!is.na(word2)) |>
+  ungroup()
+
+trigrams <- ngram_base |>
+  group_by(article_id, year, sentence_id) |>
+  mutate(
+    word2 = lead(word, 1),
+    word3 = lead(word, 2),
+    pos2 = lead(upos, 1),
+    pos3 = lead(upos, 2)
+  ) |>
+  filter(
+    !is.na(word2),
+    !is.na(word3)
+  ) |>
+  ungroup()
+```
+
+```{r ngram-processing, include=TRUE, echo=TRUE, results='hide'}
+bigrams_clean <- bigrams |>
+  filter(
+    upos %in% c("NOUN", "ADJ"),
+    pos2 %in% c("NOUN", "ADJ"),
+    word != "carabanchel",
+    word2 != "carabanchel"
+  ) |>
+  mutate(
+    bigram = str_c(word, word2, sep = " ")
+  )
+
+trigrams_clean <- trigrams |>
+  filter(
+    upos %in% c("NOUN", "ADJ"),
+    pos2 %in% c("NOUN", "ADJ", "ADP", "DET"),
+    pos3 %in% c("NOUN", "ADJ"),
+    !word %in% "carabanchel",
+    !word2 %in% "carabanchel",
+    !word3 %in% "carabanchel"
+  ) |>
+  mutate(
+    trigram = str_c(word, word2, word3, sep = " ")
+  )
+```
+
+```{r work-09}
+bigrams_clean |>
+  count(bigram, sort = TRUE) |>
+  slice_head(n = 30)
+
+bigrams_clean |>
+  distinct(article_id, bigram) |>
+  count(bigram, sort = TRUE) |>
+  slice_head(n = 30)
+```
+
+```{r work-10}
+trigrams_clean |>
+  count(trigram, sort = TRUE) |>
+  slice_head(n = 30)
+
+trigrams_clean |>
+  distinct(article_id, trigram) |>
+  count(trigram, sort = TRUE) |>
+  slice_head(n = 30)
+```
+
+<!-- Trend analysis -->
+
+A small number of common expressions with little relevance to neighbourhood representation, such as time expressions and generic age references, were removed before the trend analysis.
+
+```{r manually-excluded-expressions, include=TRUE, echo=TRUE, results='hide'}
+exclude_bigrams <- c(
+  "último año",
+  "año pasado",
+  "primero vez",
+  "semana pasado",
+  "día siguiente",
+  "pasado mes",
+  "grande dimensión"
+)
+
+exclude_trigrams <- c(
+  "millón de euro",
+  "fin de semana",
+  "hombre de año",
+  "joven de año",
+  "menor de edad",
+  "menor de año",
+  "hijo de año",
+  "mujer de año",
+  "día a día"
+)
+```
+
+```{r work-11}
+bigrams_analysis <- bigrams_clean |>
+  filter(!bigram %in% exclude_bigrams)
+
+trigrams_analysis <- trigrams_clean |>
+  filter(!trigram %in% exclude_trigrams)
+```
+
+As n-grams are naturally less frequent than individual words, I used lower frequency thresholds for the trend analysis. Bigrams were retained if they appeared at least eight times across at least three years, while trigrams were retained if they appeared at least six times across at least two years.
+
+As in the single-word analysis, frequencies were normalized per 1,000 words for each year, and a simple linear trend was used to identify expressions that generally increased or decreased over time.
+
+```{r work-12}
+bigram_year <- bigrams_analysis |>
+  count(year, bigram, name = "n") |>
+  left_join(year_total_words, by = "year") |>
+  mutate(
+    per_1000 = n / total_words * 1000
+  )
+```
+
+```{r work-13}
+bigram_trends <- bigram_year |>
+  select(year, bigram, n, per_1000) |>
+  complete(
+    bigram,
+    year = 2015:2025,
+    fill = list(n = 0, per_1000 = 0)
+  ) |>
+  group_by(bigram) |>
+  filter(
+    sum(n) >= 8,
+    sum(n > 0) >= 3
+  ) |>
+  summarise(
+    total_n = sum(n),
+    years_present = sum(n > 0),
+    slope = coef(lm(per_1000 ~ year))[2],
+    .groups = "drop"
+  )
+```
+
+```{r work-14}
+bigram_trends |>
+  arrange(desc(slope)) |>
+  slice_head(n = 20)
+
+bigram_trends |>
+  arrange(slope) |>
+  slice_head(n = 20)
+```
+
+```{r work-15}
+trigram_year <- trigrams_analysis |>
+  count(year, trigram, name = "n") |>
+  left_join(year_total_words, by = "year") |>
+  mutate(
+    per_1000 = n / total_words * 1000
+  )
+```
+
+```{r work-16}
+trigram_trends <- trigram_year |>
+  select(year, trigram, n, per_1000) |>
+  complete(
+    trigram,
+    year = 2015:2025,
+    fill = list(n = 0, per_1000 = 0)
+  ) |>
+  group_by(trigram) |>
+  filter(
+    sum(n) >= 6,
+    sum(n > 0) >= 2
+  ) |>
+  summarise(
+    total_n = sum(n),
+    years_present = sum(n > 0),
+    slope = coef(lm(per_1000 ~ year))[2],
+    .groups = "drop"
+  )
+```
+
+```{r work-17}
+trigram_trends |>
+  arrange(desc(slope)) |>
+  slice_head(n = 20)
+
+trigram_trends |>
+  arrange(slope) |>
+  slice_head(n = 20)
+```
+
+<!-- Visualization -->
+
+The figures show selected recurring expressions with clear temporal patterns and relevance to the study's focus.
+
+```{r work-18}
+increasing_bigrams <- c(
+  "metro cuadrado",
+  "espacio público",
+  "uso residencial",
+  "interés cultural",
+  "movimiento vecinal",
+  "asociación vecinal"
+)
+
+decreasing_bigrams <- c(
+  "policía nacional",
+  "policía municipal",
+  "fuente policial",
+  "arma blanco"
+)
+```
+
+```{r work-19}
+bigram_plot_data <- bigram_year |>
+  filter(bigram %in% increasing_bigrams) |>
+  select(year, bigram, per_1000) |>
+  complete(
+    bigram = increasing_bigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_bigrams_increasing <- ggplot(
+  bigram_plot_data,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ bigram, ncol = 3) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Selected bigrams increasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_bigrams_increasing
+```
+
+```{r work-20}
+bigram_plot_data_down <- bigram_year |>
+  filter(bigram %in% decreasing_bigrams) |>
+  select(year, bigram, per_1000) |>
+  complete(
+    bigram = decreasing_bigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_bigrams_decreasing <- ggplot(
+  bigram_plot_data_down,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ bigram, ncol = 2) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Selected bigrams decreasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_bigrams_decreasing
+```
+
+<!-- FIGURE STATUS: SUPPORTING -->
+
+```{r bigram-plot-final, include=TRUE, fig.width=11.5, fig.height=9}
+plot_bigram_trends <- plot_bigrams_increasing / plot_bigrams_decreasing
+plot_bigram_trends
+```
+
+```{r work-21}
+increasing_trigrams <- c(
+  "galería de arte",
+  "sindicato de vivienda",
+  "centro de memoria",
+  "proyecto de urbanización",
+  "fondo de inversión",
+  "bloque de vivienda"
+)
+
+decreasing_trigrams <- c(
+  "arma de fuego",
+  "año de prisión",
+  "robo con violencia",
+  "violencia de género"
+)
+```
+
+```{r work-22}
+trigram_plot_data <- trigram_year |>
+  filter(trigram %in% increasing_trigrams) |>
+  select(year, trigram, per_1000) |>
+  complete(
+    trigram = increasing_trigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_trigrams_increasing <- ggplot(
+  trigram_plot_data,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ trigram, ncol = 3) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Selected trigrams increasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_trigrams_increasing
+```
+
+```{r work-23}
+trigram_plot_data_down <- trigram_year |>
+  filter(trigram %in% decreasing_trigrams) |>
+  select(year, trigram, per_1000) |>
+  complete(
+    trigram = decreasing_trigrams,
+    year = 2015:2025,
+    fill = list(per_1000 = 0)
+  )
+
+plot_trigrams_decreasing <- ggplot(
+  trigram_plot_data_down,
+  aes(x = year, y = per_1000)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linetype = "dashed",
+    linewidth = 0.6
+  ) +
+  facet_wrap(~ trigram, ncol = 2) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  labs(
+    title = "Selected trigrams decreasing over time",
+    subtitle = "Normalized frequency per 1,000 words",
+    x = NULL,
+    y = "Frequency per 1,000 words"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_trigrams_decreasing
+```
+
+<!-- FIGURE STATUS: SUPPORTING -->
+
+```{r trigram-plot-final, include=TRUE, fig.width=11.5, fig.height=9}
+plot_trigram_trends <- plot_trigrams_increasing / plot_trigrams_decreasing
+plot_trigram_trends
+```
+
+The n-gram results provide additional context for the patterns found in the single-word analysis. Expressions related to policing and crime, such as *`policía nacional`*, *`policía municipal`*, and *`arma de fuego`*, are generally more common in earlier years.
+
+In later years, expressions related to housing and urban development become more visible, including *`metro cuadrado`*, *`sindicato de vivienda`*, and *`proyecto de urbanización`*. Cultural expressions such as *`galería de arte`* and *`interés cultural`* also appear more prominently.
+
+This suggests that the lexical shift is not limited to isolated words, but can also be seen in recurring expressions. However, some n-grams may reflect particular events, organisations, or individual projects rather than a broader narrative change. Their context therefore needs to be checked through close reading.
+
+
+## 3.3. TF-IDF (exploratory)
+
+**Figure status: WORKING ONLY.** TF-IDF is retained as an exploratory diagnostic rather than a main thesis result. It is used here to identify words that are especially distinctive to each year. Unlike the frequency analysis above, it gives more weight to words that are relatively common in one year but less common in other years.
+
+To reduce the influence of very rare words, I kept only terms that appeared at least 10 times in the full corpus.
+
+```{r tfidf-calculation, include=TRUE, echo=TRUE, results='hide'}
+year_tfidf <- news_tokens_content |>
+  count(year, word, name = "n") |>
+  bind_tf_idf(
+    term = word,
+    document = year,
+    n = n
+  )
+
+word_totals <- news_tokens_content |>
+  count(word, name = "total_n")
+
+year_tfidf <- year_tfidf |>
+  left_join(word_totals, by = "word") |>
+  filter(total_n >= 10)
+```
+
+```{r work-24}
+year_tfidf |>
+  arrange(desc(tf_idf)) |>
+  head(20)
+```
+
+```{r work-25}
+top_tfidf_year <- year_tfidf |>
+  group_by(year) |>
+  slice_max(tf_idf, n = 10, with_ties = FALSE) |>
+  arrange(year, desc(tf_idf))
+
+top_tfidf_year
+```
+
+<!-- Visualization -->
+
+```{r work-26}
+top_tfidf_plot <- year_tfidf |>
+  group_by(year) |>
+  slice_max(tf_idf, n = 5, with_ties = FALSE) |>
+  ungroup() |>
+  mutate(
+    word_year = reorder_within(word, tf_idf, year)
+  )
+```
+
+<!-- FIGURE STATUS: WORKING ONLY -->
+
+```{r tfidf-plot-final, include=TRUE, fig.width=11.5, fig.height=9}
+plot_tfidf <- ggplot(
+  top_tfidf_plot,
+  aes(x = tf_idf, y = word_year)
+) +
+  geom_col() +
+  scale_y_reordered() +
+  facet_wrap(~ year, scales = "free_y", ncol = 4) +
+  labs(
+    title = "Distinctive vocabulary by year",
+    subtitle = "Top TF-IDF terms for each year",
+    x = "TF-IDF",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 16),
+    plot.subtitle = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_tfidf
+```
+
+TF-IDF shows that distinctive vocabulary varies considerably from year to year and is often shaped by specific events. For example, `test` and `coronavirus` are highly distinctive in 2020. At the same time, some results are consistent with the longer-term frequency patterns. Earlier years include several distinctive terms related to crime and specific incidents, while `mural` and `arte` appear among the distinctive terms in 2025. TF-IDF therefore suggests that annual narratives reflect both short-term events and broader changes in the vocabulary associated with Carabanchel.
+
+
+
+# 4. Topic Modeling and Topic Prevalence
+
+## 4.1. Topic-model preparation
+
+Topic modeling is used to identify recurring themes across the corpus and examine how their prevalence changes between 2015 and 2025. For this analysis, nouns, adjectives and verbs are retained. Terms appearing in fewer than five articles are excluded from the document-feature matrix.
+
+```{r topic-stopwords}
+topic_stopwords <- tibble(
+  word = c(
+    "tener", "poder", "hacer", "decir", "dar",
+    "ir", "llegar", "ver", "encontrar", "llevar",
+    "contar", "explicar", "pasar", "seguir",
+    "querer", "dejar", "poner", "salir",
+    "venir", "quedar", "saber"
+  )
+)
+```
+
+```{r topic-model-tokens, results='hide'}
+topic_tokens <- lemma_tokens |>
+  filter(
+    upos %in% c("NOUN", "ADJ", "VERB"),
+    str_detect(word, "^\\p{L}+$"),
+    str_length(word) > 1
+  ) |>
+  anti_join(spanish_stopwords, by = "word") |>
+  anti_join(custom_stopwords, by = "word") |>
+  anti_join(topic_stopwords, by = "word") |>
+  filter(word != "carabanchel")
+```
+
+```{r topic-texts, results='hide'}
+topic_texts <- topic_tokens |>
+  group_by(article_id) |>
+  summarise(
+    text = str_c(word, collapse = " "),
+    .groups = "drop"
+  ) |>
+  left_join(
+    news |>
+      select(article_id, year, Outlet),
+    by = "article_id"
+  )
+
+# Keep year and outlet as document-level metadata.
+topic_corpus <- corpus(
+  topic_texts,
+  text_field = "text",
+  docid_field = "article_id"
+)
+
+topic_dfm <- tokens(topic_corpus) |>
+  dfm() |>
+  dfm_trim(
+    min_docfreq = 5,
+    docfreq_type = "count"
+  )
+
+stm_input <- convert(
+  topic_dfm,
+  to = "stm"
+)
+```
+
+## 4.2. Nine-topic STM solution
+
+The main analysis uses a **9-topic STM solution**. Candidate topic numbers were compared during model development; that sensitivity analysis is kept in the separate robustness file so that the main working analysis remains focused on the selected specification.
+
+```{r stm-nine-topic, results='hide'}
+set.seed(1234)
+
+stm_9 <- stm(
+  documents = stm_input$documents,
+  vocab = stm_input$vocab,
+  K = 9,
+  init.type = "Spectral",
+  max.em.its = 100
+)
+```
+
+```{r stm-topic-terms}
+labelTopics(stm_9, n = 10)
+```
+
+<!-- FIGURE STATUS: WORKING ONLY -->
+
+```{r stm-topic-summary, fig.width=10, fig.height=7}
+plot(
+  stm_9,
+  type = "summary",
+  n = 9
+)
+```
+
+The topic labels are interpretive rather than automatically generated. I reviewed the highest-probability articles for each topic and assigned descriptive labels based on their content.
+
+```{r representative-topic-articles, results='hide'}
+topic_docs <- topic_texts |>
+  mutate(doc_index = row_number()) |>
+  left_join(
+    news |>
+      select(article_id, Headline, Lead),
+    by = "article_id"
+  )
+
+top_topic_articles <- map_dfr(
+  1:9,
+  function(k) {
+    tibble(
+      doc_index = seq_len(nrow(stm_9$theta)),
+      topic_probability = stm_9$theta[, k]
+    ) |>
+      slice_max(
+        topic_probability,
+        n = 5,
+        with_ties = FALSE
+      ) |>
+      mutate(topic = k)
+  }
+) |>
+  left_join(topic_docs, by = "doc_index") |>
+  arrange(topic, desc(topic_probability))
+```
+
+The nine topics are labelled as follows:
+
+1. Cultural and leisure events
+2. Urban redevelopment, heritage and land use
+3. Education and social vulnerability
+4. Arts, lifestyle and neighbourhood revaluation
+5. Municipal governance, mobility and public space
+6. Prison, memory and historical repression
+7. Housing conflict, rent and displacement
+8. Health and local public services
+9. Crime, policing and emergencies
+
+```{r topic-labels}
+topic_labels <- c(
+  "Cultural and leisure events",
+  "Urban redevelopment, heritage and land use",
+  "Education and social vulnerability",
+  "Arts, lifestyle and neighbourhood revaluation",
+  "Municipal governance, mobility and public space",
+  "Prison, memory and historical repression",
+  "Housing conflict, rent and displacement",
+  "Health and local public services",
+  "Crime, policing and emergencies"
+)
+```
+
+```{r topic-proportions, results='hide'}
+theta_df <- as_tibble(stm_9$theta)
+names(theta_df) <- paste0("topic_", 1:9)
+
+theta_df <- theta_df |>
+  mutate(doc_index = row_number()) |>
+  bind_cols(
+    stm_input$meta |>
+      select(year, Outlet)
+  )
+
+theta_long <- theta_df |>
+  pivot_longer(
+    cols = starts_with("topic_"),
+    names_to = "topic",
+    values_to = "proportion"
+  ) |>
+  mutate(
+    topic_number = as.integer(str_remove(topic, "topic_")),
+    topic_label = factor(
+      topic_number,
+      levels = 1:9,
+      labels = topic_labels
+    )
+  )
+```
+
+## 4.3. Topic prevalence over time
+
+The STM gives each article a proportion for all nine topics rather than assigning it to only one topic. I therefore calculate the mean topic proportion within each year to describe how prominent each theme was in the articles published that year.
+
+```{r topic-prevalence-calculation, results='hide'}
+topic_year <- theta_long |>
+  group_by(year, topic_number, topic_label) |>
+  summarise(
+    mean_proportion = mean(proportion),
+    .groups = "drop"
+  )
+```
+
+<!-- FIGURE STATUS: THESIS -->
+
+```{r topic-prevalence-plot, fig.width=11.5, fig.height=9}
+plot_topic_prevalence <- ggplot(
+  topic_year,
+  aes(x = year, y = mean_proportion)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.7) +
+  facet_wrap(
+    ~ topic_label,
+    ncol = 3,
+    scales = "free_y"
+  ) +
+  scale_x_continuous(breaks = c(2015, 2020, 2025)) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Topic prevalence over time",
+    subtitle = "Average topic proportion in articles, 2015–2025",
+    x = NULL,
+    y = "Average topic proportion"
+  ) +
+  theme_report +
+  theme(strip.text = element_text(face = "bold"))
+
+plot_topic_prevalence
+```
+
+Crime-, policing- and emergency-related coverage is particularly prominent in the earlier years and declines after 2019, although it remains present and rises again in some later years. By contrast, arts, lifestyle and neighbourhood-revaluation coverage becomes more visible from the late 2010s and is particularly prominent by 2025. Urban redevelopment and land-use themes also become more visible in several post-2020 years, while housing conflict rises again near the end of the period.
+
+These trajectories are **not linear**. Some yearly peaks are strongly influenced by individual events, so topic prevalence is interpreted as evidence of broad changes in the mix of coverage rather than as a smooth measure of narrative change.
+
+
+# 5. Qualitative Close Reading
+
+Topic modeling identifies broad patterns, but it does not show whether an article actually frames Carabanchel itself in a particular way. I therefore selected representative articles from three topics that are especially relevant to the research question: arts/lifestyle and neighbourhood revaluation (Topic 4), housing conflict (Topic 7), and crime/policing/emergencies (Topic 9).
+
+I read these articles more closely, focusing on how Carabanchel was represented, who appeared as the main actors, and the language and framing used in each article.
+
+```{r qualitative-selection, results='hide'}
+qualitative_articles <- top_topic_articles |>
+  filter(topic %in% c(4, 7, 9)) |>
+  left_join(
+    news |>
+      select(article_id, `Full text`),
+    by = "article_id"
+  ) |>
+  select(
+    topic,
+    Headline,
+    `Full text`
+  )
+
+```
+
+| Topic / year | Article | Representation of Carabanchel | Main actors | Main framing / language | Interpretation for narrative change |
+|------------|------------|------------|------------|------------|------------|
+| **4 · 2025** | *El 'boom' gastro de Carabanchel* | An increasingly attractive cultural and gastronomic destination outside the usual central-city circuit | restaurant owners, artists, cultural businesses, residents | “revitalización”, “distrito artístico”, “efervescente”, “destino gastronómico”, district “en movimiento” | **Very strong revaluation frame.** Explicitly describes Carabanchel as acquiring a new cultural/gastronomic identity while retaining its popular/working-class character. |
+| **4 · 2023** | *Jenni Hermoso… aprendió a jugar en las calles del barrio* | A proud, ordinary working neighbourhood and source of identity | Jenni Hermoso, family, neighbours, local children | neighbourhood pride, belonging, humility, everyday street life | **Not really gentrification/revaluation.** It positively valorizes existing barrio identity and continuity rather than portraying a newly transformed Carabanchel. |
+| **4 · 2024** | *Una forma de capear la precariedad en la hostelería* | An authentic and still relatively accessible place for alternative entrepreneurship | young restaurant workers/owners, neighbourhood customers | authenticity, affordability, “Madrid casi extinto”, rejection of central-Madrid pretension | **Important intermediate frame:** Carabanchel becomes attractive partly because it is still affordable and “authentic.” This can fit early symbolic revaluation without explicitly celebrating gentrification. |
+| **4 · 2025** | *Cómo un trovador de Texas encontró su lugar en Carabanchel* | A desirable place to live, create and belong, particularly from an outsider's perspective | international musician, artist partner, migrants, local residents | diversity, walkability, local shops, street life, creativity, sense of home | **Strong positive place revaluation.** Particularly interesting because an international cultural figure interprets familiar local qualities as distinctive and desirable. |
+| **4 · 2021** | *Una galería… para la nueva meca del arte contemporáneo* | A working-class/industrial district becoming a new art centre | artists, gallery owner, new creative users, residents | “nueva meca”, 300+ artists, former industrial spaces converted into galleries/studios, neighbourhood “actualización” | **Probably the clearest early symbolic-revaluation article.** It explicitly contrasts Carabanchel's low-income/industrial past and present creative transformation. |
+| **7 · 2015** | *“Nos dijeron… que inspeccionarían el edificio”* | A residential area experiencing physical housing insecurity | residents, firefighters, municipal authorities | structural failure, displacement after building collapse, institutional responsibility | **Not gentrification-related housing pressure.** Important because it shows that the housing topic initially also captures building conditions and vulnerability. |
+| **7 · 2020** | *La presión vecinal… fuerza a la Sareb a parar un desalojo* | A contested residential space where tenants face displacement from financial/institutional property ownership | tenants, housing activists, Sareb, political parties, public authorities | eviction, vulnerability, property sale, collective resistance | **Directly relevant to displacement/financialization.** Housing is framed as a conflict between residential stability and the treatment of housing as an asset. |
+| **7 · 2025** | *Pisos nuevos, puñetazos… gran okupación* | A newly developed, expensive residential area marked by housing conflict | renters, vulnerable families, developer, desokupación company, police | high rents, new construction, illegal occupation, conflict, inequality of access | **A different housing-pressure narrative.** The article juxtaposes expensive new rental housing with families accessing apartments outside the formal market. |
+| **7 · 2025** | *“Los okupas tienen hasta su propio conserje…”* | A new “luxury” development threatened by disorder and occupation | formal tenants, occupying families, developer, private desokupación company | exclusivity/luxury versus occupation, insecurity and conflict | **Shows transformation of the built environment**, but framing is primarily security/occupation rather than affordability or gentrification. |
+| **7 · 2025** | *Un casting para alquilar…* | A highly selective and expensive rental market alongside informal access to housing | formal renters, occupying families, Vivenio, police | difficult rental “casting”, high rent, insecurity, administrative silence | **Very relevant to changing housing conditions.** It directly juxtaposes barriers to formal rental access with occupation of vacant units in a newly built block. |
+| **9 · 2016** | *El parricida de Carabanchel…* | Mainly the geographic location/name attached to an extreme crime | accused father, children, forensic doctors, prosecutors | murder, violence, forensic detail, trial | **Carabanchel itself is barely characterized.** The district becomes associated with crime through repeated place-labeling rather than an explicit claim that the neighbourhood is dangerous. |
+| **9 · 2016** | *Todos los policías afirman…* | Again primarily a location attached to a criminal case | police, accused, court | criminal investigation and testimony | Same point: **crime association rather than explicit neighbourhood framing.** This distinction is methodologically important. |
+| **9 · 2020** | *Ataque de Trinitarios a Dominican…* | More explicitly represented as territory of gang conflict | gangs, young victims, police, local witnesses | violence, weapons, gangs, “territory” | **Strongest territorialized crime frame** of these examples: criminal violence is explicitly connected to the area's spatial identity. |
+| **9 · 2025** | *Cinco personas rajan la cara…* | Location of a violent robbery, with possible gang activity | victim, attackers, police | robbery, weapons, violent youth groups | Primarily event reporting. It demonstrates that **crime coverage has not disappeared**, even if its relative prevalence has declined. |
+| **9 · 2025** | *Una mujer sufre heridas graves…* | Simply the location of a traffic accident | victim, emergency services, police, sanitation-truck driver | accident/emergency reporting | **Not a crime narrative at all.** This shows Topic 9 is partly an emergency/policing topic and should probably be labelled more cautiously than simply “Crime and policing.” |
+
+The close reading adds an important distinction that is not visible from word frequencies or topic prevalence alone. In several earlier crime-related articles, Carabanchel is mainly used as the location of an incident rather than explicitly described as a dangerous neighbourhood. Crime coverage can therefore create an association with the district without directly constructing a neighbourhood narrative.
+
+The later cultural articles are different. Several articles from 2021 onwards describe Carabanchel itself as changing, creative, attractive, or authentic. For example, the district is described as a new art centre, an alternative place for cultural activity, or an increasingly desirable place to live and visit.
+
+Housing coverage is more mixed. It includes building vulnerability and eviction in earlier years, but later articles also discuss high rents, new development, and unequal access to housing. Overall, the clearest evidence of symbolic revaluation appears in the cultural and lifestyle coverage, while the housing and crime topics require more contextual interpretation.
+
+
+
+# 6. Main Findings
+
+The narrative analysis points to a **broadening of how Carabanchel is represented**, rather than a simple replacement of a negative image with a positive one.
+
+1. **Media visibility increased strongly in the later years.** This is descriptive context only; article volume does not by itself indicate symbolic revaluation.
+2. **Lexical patterns changed.** Policing- and incident-related vocabulary is generally more prominent earlier, while words and recurring expressions related to the neighbourhood itself, housing, urban development, cultural activity and artists become more visible later.
+3. **Topic prevalence also changes, but unevenly.** Crime, policing and emergency coverage remains present throughout the period, while arts/lifestyle/neighbourhood revaluation and urban-change themes become more visible in later years.
+4. **Close reading changes the interpretation of the computational results.** Many earlier crime-related articles use Carabanchel mainly as the location of an incident rather than explicitly framing the district itself as dangerous. Later cultural and lifestyle articles more often describe Carabanchel itself as creative, attractive, authentic or undergoing change.
+5. The clearest narrative result is therefore that **Carabanchel increasingly appears not only as the location of news events, but as a place that is itself described, interpreted and assigned a changing identity**.
+
+This does not imply a uniform or linear symbolic transformation. Event-based reporting continues, and later positive or revaluation-oriented narratives coexist with older working-class identity, housing conflict and other forms of coverage.

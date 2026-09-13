@@ -1,0 +1,1227 @@
+---
+title: "Part 1 — Material Change in Carabanchel"
+author: "Jueun Lee"
+date: "12 September 2026"
+knit: (function(inputFile, encoding) { outputDir <- file.path(dirname(inputFile), "..", "html"); dir.create(outputDir, recursive = TRUE, showWarnings = FALSE); rmarkdown::render(inputFile, encoding = encoding, output_dir = outputDir) })
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+find_project_root <- function(start = getwd()) {
+  current <- normalizePath(start, winslash = "/", mustWork = TRUE)
+
+  repeat {
+    if (
+      dir.exists(file.path(current, "data", "raw")) &&
+      dir.exists(file.path(current, "report"))
+    ) {
+      return(current)
+    }
+
+    parent <- dirname(current)
+    if (identical(parent, current)) {
+      stop("Cannot locate the MUCSS26_TFM project root.")
+    }
+    current <- parent
+  }
+}
+
+project_root <- find_project_root()
+knitr::opts_knit$set(root.dir = project_root)
+
+raw_dir <- file.path(project_root, "data", "raw")
+processed_dir <- file.path(project_root, "data", "processed")
+figures_dir <- file.path(project_root, "figures")
+
+dir.create(processed_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  include = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "95%",
+  fig.retina = 2
+)
+```
+
+```{=html}
+<style>
+.main-container {
+  max-width: 1200px;
+}
+
+table {
+  font-size: 0.90em;
+}
+</style>
+```
+
+```{r packages}
+library(tidyverse)
+library(readxl)
+library(ggrepel)
+library(patchwork)
+library(knitr)
+```
+
+```{r plot-settings}
+carabanchel_col <- "#C46A3A"
+dark_col <- "#444444"
+blue_col <- "#4C78A8"
+other_col <- "grey75"
+
+theme_report <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 16),
+    plot.subtitle = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+norm_code <- function(x) {
+  str_pad(as.character(as.integer(x)), width = 2, pad = "0")
+}
+```
+
+# 0. Scope and Data
+
+## 0.1. Comparison framework
+
+This working file contains the full analysis for **Part 1 — Material Change**. The analysis compares Carabanchel with all **21 Madrid districts** across a set of demographic, socioeconomic and housing-market indicators.
+
+All analyses in Sections 1–4 use the common **2015–2022** comparison period. Several Carabanchel series continue beyond 2022, but these later observations are used only in Section 5.
+
+The indicators are examined as distinct dimensions of change, allowing differences in the timing and intensity of demographic, socioeconomic and housing-market change to be observed separately.
+
+## 0.2. Data sources
+
+The analysis combines six public data sources.
+
+| Data | Period | Source |
+|:-----------------------|:-----------------------|:-----------------------|
+| Population, age and nationality | 2015–2025 | Madrid Municipal Register (*Padrón municipal histórico*) |
+| Average net income per person | 2015–2022 | Madrid City Council, household income distribution data |
+| Advertised rent per m² | 2015–2024 | Madrid Data Bank, based on historical Idealista reports |
+| Used-housing sale price per m² | 2015–2025 | Madrid Data Bank / Colegio de Registradores de España |
+| Education level (age 25+) | 2015–2025 | Madrid Data Bank, population by education level |
+| Occupational-status proxy | 2015–2022 | Ayuntamiento de Madrid, *Anuario Estadístico Municipal*, Chapter 3, Table 4.2 |
+
+## 0.3. Data import and preparation
+
+The following chunks import and prepare the district-level datasets used throughout Part 1. Import code is kept visible in this working file for reproducibility, while intermediate console output is suppressed.
+
+### Municipal register
+
+```{r padron-import, echo=TRUE, results='hide'}
+padron_files <- tibble(
+  year = 2015:2025,
+  path = file.path(
+    raw_dir, "padron_municipal", paste0(year, ".csv")
+  )
+)
+
+read_padron <- function(path, year) {
+  data <- read_delim(
+    path,
+    delim = ";",
+    show_col_types = FALSE,
+    trim_ws = TRUE
+  )
+
+  data <- data[, 1:12]
+
+  names(data) <- c(
+    "district_code",
+    "district_name",
+    "district_barrio_code",
+    "barrio_name",
+    "barrio_code",
+    "district_section_code",
+    "section_code",
+    "age",
+    "spanish_men",
+    "spanish_women",
+    "foreign_men",
+    "foreign_women"
+  )
+
+  data %>%
+    mutate(
+      year = as.integer(year),
+      district_code = norm_code(district_code),
+      age = parse_number(as.character(age)),
+      across(
+        c(spanish_men, spanish_women, foreign_men, foreign_women),
+        ~ replace_na(parse_number(as.character(.x)), 0)
+      )
+    )
+}
+
+padron_all <- map2_dfr(
+  padron_files$path,
+  padron_files$year,
+  read_padron
+)
+
+district_yearly <- padron_all %>%
+  mutate(
+    district_name = str_squish(district_name),
+    population = spanish_men + spanish_women + foreign_men + foreign_women,
+    foreign_population = foreign_men + foreign_women
+  ) %>%
+  group_by(year, district_code, district_name) %>%
+  summarise(
+    total_population = sum(population, na.rm = TRUE),
+    population_25_39 = sum(population[age >= 25 & age <= 39], na.rm = TRUE),
+    foreign_population = sum(foreign_population, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_25_39 = population_25_39 / total_population * 100,
+    pct_foreign = foreign_population / total_population * 100
+  )
+```
+
+### Income
+
+```{r income-import, echo=TRUE, results='hide'}
+income_files <- file.path(
+  raw_dir,
+  "income",
+  c(
+    "20152016.xlsx",
+    "20162017.xlsx",
+    "20172018.xlsx",
+    "20192020.xlsm",
+    "20212022.xlsx"
+  )
+)
+
+read_income <- function(path) {
+  raw <- read_excel(
+    path,
+    sheet = "Distrito-Barrio",
+    skip = 5,
+    col_names = FALSE
+  )
+
+  years <- c(
+    as.numeric(raw[[2]][1]),
+    as.numeric(raw[[4]][1])
+  )
+
+  area_names <- str_squish(as.character(raw[[1]]))
+
+  district_rows <- which(
+    str_detect(area_names, "^\\d{1,2}\\.\\s")
+  )
+
+  bind_rows(
+    tibble(
+      year = years[1],
+      district_code = norm_code(str_extract(area_names[district_rows], "^\\d{1,2}")),
+      district_name = str_remove(area_names[district_rows], "^\\d{1,2}\\.\\s*"),
+      income_per_person = as.numeric(raw[[2]][district_rows])
+    ),
+    tibble(
+      year = years[2],
+      district_code = norm_code(str_extract(area_names[district_rows], "^\\d{1,2}")),
+      district_name = str_remove(area_names[district_rows], "^\\d{1,2}\\.\\s*"),
+      income_per_person = as.numeric(raw[[4]][district_rows])
+    )
+  )
+}
+
+income_district_yearly <- map_dfr(
+  income_files,
+  read_income
+) %>%
+  distinct(year, district_code, .keep_all = TRUE) %>%
+  arrange(year, district_code)
+```
+
+### Advertised rent
+
+```{r rent-import, echo=TRUE, results='hide'}
+rent_monthly <- read_delim(
+  file.path(raw_dir, "rent", "rent_madrid_2015_2024.csv"),
+  delim = ";",
+  skip = 4,
+  n_max = 120,
+  locale = locale(decimal_mark = ","),
+  na = c("", ".."),
+  show_col_types = FALSE
+)
+
+names(rent_monthly)[1:2] <- c("year", "month")
+
+rent_monthly <- rent_monthly %>%
+  mutate(year = as.integer(year))
+
+rent_district_monthly <- rent_monthly %>%
+  select(-`Ciudad de Madrid`) %>%
+  pivot_longer(
+    cols = matches("^\\d{2}\\."),
+    names_to = "district",
+    values_to = "rent_per_m2"
+  ) %>%
+  mutate(
+    district_code = norm_code(str_extract(district, "^\\d{2}")),
+    district_name = str_remove(district, "^\\d{2}\\.\\s*")
+  )
+
+rent_district_yearly <- rent_district_monthly %>%
+  group_by(year, district_code, district_name) %>%
+  summarise(
+    rent_per_m2 = mean(rent_per_m2, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+### Used-housing sale prices
+
+```{r sale-import, echo=TRUE, results='hide'}
+sale_price_raw <- read_delim(
+  file.path(raw_dir, "sale_price", "sale_price_madrid_2015_2025.csv"),
+  delim = ";",
+  skip = 7,
+  n_max = 242,
+  col_names = c(
+    "year",
+    "district",
+    "barrio",
+    "sale_price_per_m2"
+  ),
+  locale = locale(
+    decimal_mark = ",",
+    grouping_mark = "."
+  ),
+  show_col_types = FALSE
+)
+
+sale_price_district_yearly <- sale_price_raw %>%
+  filter(district != "Ciudad de Madrid") %>%
+  mutate(
+    year = as.integer(year),
+    district_code = norm_code(str_extract(district, "^\\d{2}")),
+    district_name = str_remove(district, "^\\d{2}\\.\\s*")
+  ) %>%
+  select(
+    year,
+    district_code,
+    district_name,
+    sale_price_per_m2
+  )
+```
+
+### Education
+
+```{r education-import, echo=TRUE, results='hide'}
+education_files <- file.path(
+  raw_dir,
+  "education",
+  c(
+    "education_madrid_2015_2016.csv",
+    "education_madrid_2017_2018.csv",
+    "education_madrid_2019_2020.csv",
+    "education_madrid_2021_2022.csv",
+    "education_madrid_2023_2024.csv",
+    "education_madrid_2025.csv"
+  )
+)
+
+read_education <- function(path) {
+  n_data <- if (str_detect(basename(path), "2025\\.csv$")) 374 else 748
+
+  raw <- read_delim(
+    path,
+    delim = ";",
+    skip = 7,
+    n_max = n_data,
+    col_names = FALSE,
+    col_types = cols(.default = "c"),
+    show_col_types = FALSE
+  )
+
+  raw %>%
+    filter(
+      X3 == "Total",
+      str_detect(X1, "^1 de enero de \\d{4}$")
+    ) %>%
+    transmute(
+      year = as.integer(str_extract(X1, "\\d{4}$")),
+      district = X2,
+      population_25plus = parse_number(
+        X4,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      university_diploma = parse_number(
+        X13,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      university_technical = parse_number(
+        X14,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      university_degree = parse_number(
+        X15,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      ),
+      postgraduate = parse_number(
+        X17,
+        locale = locale(grouping_mark = ".", decimal_mark = ",")
+      )
+    ) %>%
+    filter(district != "Ciudad de Madrid") %>%
+    mutate(
+      district_code = norm_code(str_extract(district, "^\\d{2}")),
+      district_name = str_remove(district, "^\\d{2}\\.\\s*"),
+      university_educated =
+        university_diploma +
+        university_technical +
+        university_degree +
+        postgraduate,
+      pct_university =
+        university_educated / population_25plus * 100
+    ) %>%
+    select(
+      year,
+      district_code,
+      district_name,
+      population_25plus,
+      university_educated,
+      pct_university
+    )
+}
+
+education_yearly <- map_dfr(
+  education_files,
+  read_education
+) %>%
+  arrange(year, district_code)
+```
+
+### Occupational status
+
+```{r occupation-import, echo=TRUE, results='hide'}
+occupation_raw <- read_excel(
+  file.path(raw_dir, "occupation", "occupation_madrid_2015_2022.xlsx"),
+  sheet = "tidy"
+)
+
+occupation_yearly <- occupation_raw %>%
+  filter(geography_type == "district") %>%
+  mutate(district_code = norm_code(district_code)) %>%
+  group_by(year, district_code, district_name) %>%
+  summarise(
+    total = sum(
+      n[contribution_group == "Grupo de cotización (Sólo R. General)"],
+      na.rm = TRUE
+    ),
+    g1 = sum(
+      n[contribution_group ==
+          "Ingenieros y licenciados. Personal de alta dirección"],
+      na.rm = TRUE
+    ),
+    g2 = sum(
+      n[contribution_group ==
+          "Ingenieros técnicos, peritos y ayudantes titulados"],
+      na.rm = TRUE
+    ),
+    g3 = sum(
+      n[contribution_group ==
+          "Jefes administrativos y de taller"],
+      na.rm = TRUE
+    ),
+    no_consta = sum(
+      n[contribution_group == "No consta"],
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+```
+
+# 1. Demographic Change
+
+Demographic indicators are used to examine how Carabanchel's population has changed over time. The analysis focuses on three measures: the share of residents aged 25–39, the foreign-national share, and total population.
+
+```{r demographic-calculations, echo=TRUE, include=TRUE, results='hide'}
+demographic_change <- district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    young_change_pp = pct_25_39 - pct_25_39[year == 2015],
+    foreign_change_pp = pct_foreign - pct_foreign[year == 2015],
+    population_change_pct =
+      (total_population / total_population[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+young_change_2022 <- demographic_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(young_change_pp)))
+
+foreign_change_2022 <- demographic_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(foreign_change_pp)))
+
+population_change_2022 <- demographic_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(population_change_pct)))
+```
+
+## 1.1. Share aged 25–39
+
+Between 2015 and 2022, the share of residents aged 25–39 changed by `r sprintf("%.2f", young_change_2022$young_change_pp[young_change_2022$district_code == "11"])` percentage points in Carabanchel. Its rank among the 21 districts was `r young_change_2022$rank[young_change_2022$district_code == "11"]`/21. The demographic change in Carabanchel was therefore not primarily driven by a large increase in the young-adult share during the common comparison period.
+
+## 1.2. Foreign-national share
+
+The foreign-national share increased by `r sprintf("%.2f", foreign_change_2022$foreign_change_pp[foreign_change_2022$district_code == "11"])` percentage points, ranking `r foreign_change_2022$rank[foreign_change_2022$district_code == "11"]`/21.
+
+## 1.3. Total population
+
+Carabanchel's total population increased by about `r sprintf("%.1f", population_change_2022$population_change_pct[population_change_2022$district_code == "11"])`%, ranking `r population_change_2022$rank[population_change_2022$district_code == "11"]`/21.
+
+## 1.4. Cross-district comparison
+
+```{r demographic-summary, include=TRUE}
+demo_summary <- tibble(
+  Indicator = c(
+    "Share aged 25–39",
+    "Foreign-national share",
+    "Total population"
+  ),
+  `Carabanchel change` = c(
+    paste0(
+      sprintf("%.2f", young_change_2022$young_change_pp[young_change_2022$district_code == "11"]),
+      " pp"
+    ),
+    paste0(
+      "+",
+      sprintf("%.2f", foreign_change_2022$foreign_change_pp[foreign_change_2022$district_code == "11"]),
+      " pp"
+    ),
+    paste0(
+      "+",
+      sprintf("%.2f", population_change_2022$population_change_pct[population_change_2022$district_code == "11"]),
+      "%"
+    )
+  ),
+  `Rank among 21 districts` = c(
+    paste0(young_change_2022$rank[young_change_2022$district_code == "11"], "/21"),
+    paste0(foreign_change_2022$rank[foreign_change_2022$district_code == "11"], "/21"),
+    paste0(population_change_2022$rank[population_change_2022$district_code == "11"], "/21")
+  )
+)
+
+kable(demo_summary, align = c("l", "r", "r"))
+```
+
+<!-- FIGURE STATUS: SUPPORTING -->
+
+```{r demographic-bars, include=TRUE, echo=TRUE, fig.width=15.5, fig.height=7.2, out.width="100%"}
+demo_plot_data <- list(
+  young = young_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  foreign = foreign_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  population = population_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts"))
+)
+
+plot_demo_young <- ggplot(
+  demo_plot_data$young,
+  aes(x = reorder(district_name, young_change_pp), y = young_change_pp, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Age 25–39", subtitle = "2015–2022", x = NULL, y = "Change (pp)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_demo_foreign <- ggplot(
+  demo_plot_data$foreign,
+  aes(x = reorder(district_name, foreign_change_pp), y = foreign_change_pp, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Foreign-national share", subtitle = "2015–2022", x = NULL, y = "Change (pp)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_demo_population <- ggplot(
+  demo_plot_data$population,
+  aes(x = reorder(district_name, population_change_pct), y = population_change_pct, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Total population", subtitle = "2015–2022", x = NULL, y = "Change (%)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_demographic <-
+  plot_demo_young + plot_demo_foreign + plot_demo_population +
+  plot_layout(ncol = 3) +
+  plot_annotation(title = "Demographic change across Madrid districts")
+
+plot_demographic
+```
+
+**Part 1 demographic takeaway:** Carabanchel became more demographically dynamic, especially through population growth and a rising foreign-national share, but this did not coincide with a large increase in the share aged 25–39.
+
+# 2. Socioeconomic Change
+
+The main socioeconomic indicators are income, university education and higher occupational status. Together they provide a more direct view of whether Carabanchel experienced broad district-wide socioeconomic upgrading.
+
+## 2.1. Income
+
+```{r income-change, echo=TRUE, include=TRUE, results='hide'}
+income_change <- income_district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    income_change_pct =
+      (income_per_person / income_per_person[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+income_change_2022 <- income_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(income_change_pct)))
+```
+
+Carabanchel's average net income per person increased by `r sprintf("%.2f", income_change_2022$income_change_pct[income_change_2022$district_code == "11"])`% between 2015 and 2022. This ranked `r income_change_2022$rank[income_change_2022$district_code == "11"]`/21, the lowest growth rate among Madrid districts.
+
+## 2.2. University education
+
+```{r education-change, echo=TRUE, include=TRUE, results='hide'}
+education_change <- education_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    education_change_pp =
+      pct_university - pct_university[year == 2015]
+  ) %>%
+  ungroup()
+
+education_change_2022 <- education_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(education_change_pp)))
+```
+
+The university-educated share increased by `r sprintf("%.2f", education_change_2022$education_change_pp[education_change_2022$district_code == "11"])` percentage points, ranking `r education_change_2022$rank[education_change_2022$district_code == "11"]`/21. This indicates educational upgrading in absolute terms, but relatively weak change compared with most Madrid districts.
+
+## 2.3. Higher occupational status
+
+The main measure is:
+
+$$
+\text{Higher occupational-status share}
+=
+\frac{G1+G2}{\text{Total Régimen General}}\times100
+$$
+
+- **G1:** Ingenieros y licenciados. Personal de alta dirección\
+- **G2:** Ingenieros técnicos, peritos y ayudantes titulados\
+- **G3:** Jefes administrativos y de taller
+
+`No consta` is retained in the denominator in the main specification because it is not a negligible category and varies across districts. Alternative specifications that exclude `No consta` and/or include G3 are kept separately as robustness checks.
+
+```{r occupation-change, echo=TRUE, include=TRUE, results='hide'}
+occupation_main <- occupation_yearly %>%
+  mutate(
+    pct_high_occupation = (g1 + g2) / total * 100
+  ) %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    occupation_change_pp =
+      pct_high_occupation - pct_high_occupation[year == 2015]
+  ) %>%
+  ungroup()
+
+occupation_change_2022 <- occupation_main %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(occupation_change_pp)))
+```
+
+Carabanchel ranked `r occupation_change_2022$rank[occupation_change_2022$district_code == "11"]`/21 for change in the higher occupational-status share.
+
+## 2.4. Cross-district comparison
+
+```{r socioeconomic-summary, include=TRUE}
+socio_summary <- tibble(
+  Indicator = c(
+    "Average net income per person",
+    "University-educated share",
+    "Higher occupational-status share"
+  ),
+  `Carabanchel change, 2015–2022` = c(
+    paste0(
+      "+",
+      sprintf("%.2f", income_change_2022$income_change_pct[income_change_2022$district_code == "11"]),
+      "%"
+    ),
+    paste0(
+      "+",
+      sprintf("%.2f", education_change_2022$education_change_pp[education_change_2022$district_code == "11"]),
+      " pp"
+    ),
+    paste0(
+      ifelse(
+        occupation_change_2022$occupation_change_pp[occupation_change_2022$district_code == "11"] >= 0,
+        "+", ""
+      ),
+      sprintf("%.2f", occupation_change_2022$occupation_change_pp[occupation_change_2022$district_code == "11"]),
+      " pp"
+    )
+  ),
+  `Rank among 21 districts` = c(
+    paste0(income_change_2022$rank[income_change_2022$district_code == "11"], "/21"),
+    paste0(education_change_2022$rank[education_change_2022$district_code == "11"], "/21"),
+    paste0(occupation_change_2022$rank[occupation_change_2022$district_code == "11"], "/21")
+  )
+)
+
+kable(socio_summary, align = c("l", "r", "r"))
+```
+
+<!-- FIGURE STATUS: THESIS -->
+
+```{r socioeconomic-bars, include=TRUE, echo=TRUE, fig.width=15.5, fig.height=7.2, out.width="100%"}
+socio_plot_data <- list(
+  income = income_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  education = education_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  occupation = occupation_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts"))
+)
+
+plot_socio_income <- ggplot(
+  socio_plot_data$income,
+  aes(x = reorder(district_name, income_change_pct), y = income_change_pct, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Income per person", subtitle = "2015–2022", x = NULL, y = "Change (%)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_socio_education <- ggplot(
+  socio_plot_data$education,
+  aes(x = reorder(district_name, education_change_pp), y = education_change_pp, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "University-educated share", subtitle = "2015–2022", x = NULL, y = "Change (pp)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_socio_occupation <- ggplot(
+  socio_plot_data$occupation,
+  aes(x = reorder(district_name, occupation_change_pp), y = occupation_change_pp, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Higher occupational status", subtitle = "2015–2022", x = NULL, y = "Change (pp)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7), plot.title = element_text(size = 12), plot.subtitle = element_text(size = 9))
+
+plot_socioeconomic <-
+  plot_socio_income + plot_socio_education + plot_socio_occupation +
+  plot_layout(ncol = 3) +
+  plot_annotation(title = "Socioeconomic change across Madrid districts")
+
+plot_socioeconomic
+```
+
+**Part 1 socioeconomic takeaway:** all three indicators point in the same direction. Carabanchel experienced relatively weak district-wide socioeconomic upgrading compared with the rest of Madrid.
+
+# 3. Housing-Market Change
+
+## 3.1. Advertised rent
+
+```{r rent-change, echo=TRUE, include=TRUE, results='hide'}
+rent_change <- rent_district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    rent_change_pct =
+      (rent_per_m2 / rent_per_m2[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+rent_change_2022 <- rent_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(rent_change_pct)))
+```
+
+Between 2015 and 2022, advertised rent increased by `r sprintf("%.2f", rent_change_2022$rent_change_pct[rent_change_2022$district_code == "11"])`% in Carabanchel, ranking `r rent_change_2022$rank[rent_change_2022$district_code == "11"]`/21 among Madrid districts.
+
+This differs sharply from Carabanchel's position on the socioeconomic indicators.
+
+## 3.2. Used-housing sale prices
+
+```{r sale-change, echo=TRUE, include=TRUE, results='hide'}
+sale_price_change <- sale_price_district_yearly %>%
+  group_by(district_code, district_name) %>%
+  mutate(
+    sale_change_pct =
+      (sale_price_per_m2 / sale_price_per_m2[year == 2015] - 1) * 100
+  ) %>%
+  ungroup()
+
+sale_price_change_2022 <- sale_price_change %>%
+  filter(year == 2022) %>%
+  mutate(rank = min_rank(desc(sale_change_pct)))
+```
+
+Used-housing sale prices increased by `r sprintf("%.2f", sale_price_change_2022$sale_change_pct[sale_price_change_2022$district_code == "11"])`%, ranking `r sale_price_change_2022$rank[sale_price_change_2022$district_code == "11"]`/21. The increase was substantial in absolute terms but less exceptional across Madrid than the increase in advertised rent.
+
+## 3.3. Cross-district comparison
+
+<!-- FIGURE STATUS: THESIS -->
+
+```{r housing-bars, include=TRUE, echo=TRUE, fig.width=13.5, fig.height=7.2, out.width="100%"}
+housing_plot_data <- list(
+  rent = rent_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts")),
+  sale = sale_price_change_2022 %>%
+    mutate(highlight = if_else(district_code == "11", "Carabanchel", "Other districts"))
+)
+
+plot_housing_rent <- ggplot(
+  housing_plot_data$rent,
+  aes(x = reorder(district_name, rent_change_pct), y = rent_change_pct, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Advertised rent", subtitle = "2015–2022", x = NULL, y = "Change (%)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 8), plot.title = element_text(size = 13), plot.subtitle = element_text(size = 10))
+
+plot_housing_sale <- ggplot(
+  housing_plot_data$sale,
+  aes(x = reorder(district_name, sale_change_pct), y = sale_change_pct, fill = highlight)
+) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  scale_fill_manual(values = c("Carabanchel" = carabanchel_col, "Other districts" = other_col)) +
+  labs(title = "Used-housing sale price", subtitle = "2015–2022", x = NULL, y = "Change (%)") +
+  theme_report +
+  theme(legend.position = "none", axis.text.y = element_text(size = 8), plot.title = element_text(size = 13), plot.subtitle = element_text(size = 10))
+
+plot_housing_market <-
+  plot_housing_rent + plot_housing_sale +
+  plot_layout(ncol = 2) +
+  plot_annotation(title = "Housing-market change across Madrid districts")
+
+plot_housing_market
+```
+
+The figure shows that rent and sale-price change should not automatically be treated as the same housing-market process. Carabanchel stands out more clearly for advertised rent growth than for used-housing sale-price growth.
+
+# 4. Synthesising Material Change
+
+The preceding results show that the indicators do not move together in a single uniform pattern. This section compares those dimensions directly rather than combining all indicators into one overall gentrification score.
+
+## 4.1. Relationship between indicators
+
+```{r district-change-dataset, echo=TRUE, results='hide'}
+district_change_2022 <- rent_change %>%
+  filter(year == 2022) %>%
+  select(
+    district_code,
+    district_name,
+    rent_change_pct
+  ) %>%
+  left_join(
+    sale_price_change %>%
+      filter(year == 2022) %>%
+      select(district_code, sale_change_pct),
+    by = "district_code"
+  ) %>%
+  left_join(
+    income_change %>%
+      filter(year == 2022) %>%
+      select(district_code, income_change_pct),
+    by = "district_code"
+  ) %>%
+  left_join(
+    education_change %>%
+      filter(year == 2022) %>%
+      select(district_code, education_change_pp),
+    by = "district_code"
+  ) %>%
+  left_join(
+    occupation_main %>%
+      filter(year == 2022) %>%
+      select(district_code, occupation_change_pp),
+    by = "district_code"
+  )
+```
+
+```{r indicator-correlations, echo=TRUE}
+correlation_matrix <- district_change_2022 %>%
+  select(
+    Rent = rent_change_pct,
+    `Sale price` = sale_change_pct,
+    Income = income_change_pct,
+    Education = education_change_pp,
+    Occupation = occupation_change_pp
+  ) %>%
+  cor(use = "pairwise.complete.obs")
+
+kable(
+  round(correlation_matrix, 2),
+  caption = "Correlation between district-level indicator changes, 2015–2022"
+)
+```
+
+The strongest relationship is between education and occupational-status change, while rent and sale-price growth are much less closely aligned. With only 21 districts, these correlations are descriptive rather than inferential. Their main purpose is to show why the dimensions should not automatically be treated as interchangeable.
+
+## 4.2. Socioeconomic upgrading measure
+
+For the two-dimensional comparison below, education and occupation are first combined into a social/professional-status component because they measure closely related aspects of socioeconomic composition. Income is then combined with that component:
+
+$$
+SocialStatus_i =
+\frac{z(Education_i)+z(Occupation_i)}{2}
+$$
+
+$$
+SocioeconomicUpgrading_i =
+\frac{z(Income_i)+SocialStatus_i}{2}
+$$
+
+A score of zero indicates the average change across the 21 districts, not "no change".
+
+```{r socioeconomic-upgrading-score, echo=TRUE, results='hide'}
+district_scores_2022 <- district_change_2022 %>%
+  mutate(
+    z_rent = as.numeric(scale(rent_change_pct)),
+    z_sale = as.numeric(scale(sale_change_pct)),
+    z_income = as.numeric(scale(income_change_pct)),
+    z_education = as.numeric(scale(education_change_pp)),
+    z_occupation = as.numeric(scale(occupation_change_pp)),
+    social_status = (z_education + z_occupation) / 2,
+    socioeconomic_upgrading =
+      (z_income + social_status) / 2
+  )
+```
+
+## 4.3. Rental-market pressure and socioeconomic upgrading
+
+<!-- FIGURE STATUS: SUPPORTING / THESIS CANDIDATE -->
+
+```{r rent-socio-plot, include=TRUE, fig.width=10, fig.height=6.2}
+plot_scores <- district_scores_2022 %>%
+  mutate(
+    highlight = if_else(
+      district_code == "11",
+      "Carabanchel",
+      "Other districts"
+    )
+  )
+
+plot_rent_socio <- ggplot(
+  plot_scores,
+  aes(
+    x = socioeconomic_upgrading,
+    y = z_rent
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  geom_point(
+    aes(color = highlight, size = highlight)
+  ) +
+  geom_text_repel(
+    aes(label = district_name, color = highlight),
+    size = 3,
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(
+    values = c(
+      "Carabanchel" = carabanchel_col,
+      "Other districts" = dark_col
+    )
+  ) +
+  scale_size_manual(
+    values = c(
+      "Carabanchel" = 4,
+      "Other districts" = 2.2
+    )
+  ) +
+  labs(
+    title = "Rental-market pressure and socioeconomic upgrading",
+    subtitle = "Madrid districts, change from 2015 to 2022",
+    x = "Socioeconomic upgrading",
+    y = "Rent growth (standardized)",
+    color = NULL,
+    size = NULL
+  ) +
+  theme_report +
+  theme(legend.position = "none")
+
+plot_rent_socio
+```
+
+Carabanchel occupies a clear upper-left position: rent growth was above the Madrid district average, while socioeconomic upgrading was below it. A similar combination appears in several southern and south-western districts.
+
+**Part 1 synthesis:** high rental-market pressure in Carabanchel did not coincide with broad district-wide socioeconomic upgrading of the kind that would be expected in a more consolidated gentrification process.
+
+# 5. Carabanchel after 2022
+
+The 2015–2022 period remains the main cross-district comparison. This section extends only the Carabanchel timeline where later data are available. It should therefore be interpreted separately from the common-period comparison.
+
+```{r carabanchel-extension}
+carabanchel_extended <- district_yearly %>%
+  filter(
+    district_code == "11",
+    year >= 2015,
+    year <= 2025
+  ) %>%
+  select(
+    year,
+    total_population,
+    pct_25_39,
+    pct_foreign
+  ) %>%
+  left_join(
+    rent_district_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, rent_per_m2),
+    by = "year"
+  ) %>%
+  left_join(
+    sale_price_district_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, sale_price_per_m2),
+    by = "year"
+  ) %>%
+  left_join(
+    income_district_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, income_per_person),
+    by = "year"
+  ) %>%
+  left_join(
+    education_yearly %>%
+      filter(district_code == "11") %>%
+      select(year, pct_university),
+    by = "year"
+  ) %>%
+  left_join(
+    occupation_main %>%
+      filter(district_code == "11") %>%
+      select(year, pct_high_occupation),
+    by = "year"
+  ) %>%
+  mutate(
+    population_index =
+      total_population / total_population[year == 2015] * 100,
+    rent_index =
+      rent_per_m2 / rent_per_m2[year == 2015] * 100,
+    sale_index =
+      sale_price_per_m2 / sale_price_per_m2[year == 2015] * 100,
+    university_change_pp =
+      pct_university - pct_university[year == 2015],
+    occupation_change_pp =
+      pct_high_occupation - pct_high_occupation[year == 2015],
+    young_change_pp =
+      pct_25_39 - pct_25_39[year == 2015],
+    foreign_change_pp =
+      pct_foreign - pct_foreign[year == 2015]
+  )
+```
+
+## 5.1. Housing-market trajectory
+
+<!-- FIGURE STATUS: THESIS CANDIDATE -->
+
+```{r housing-timeline-plot, include=TRUE, fig.width=10, fig.height=6}
+market_long <- carabanchel_extended %>%
+  select(
+    year,
+    rent_index,
+    sale_index
+  ) %>%
+  pivot_longer(
+    cols = c(rent_index, sale_index),
+    names_to = "indicator",
+    values_to = "index"
+  ) %>%
+  mutate(
+    indicator = recode(
+      indicator,
+      rent_index = "Advertised rent",
+      sale_index = "Used-housing sale price"
+    )
+  )
+
+plot_housing_timeline <- ggplot(
+  market_long,
+  aes(
+    x = year,
+    y = index,
+    color = indicator,
+    linetype = indicator,
+    group = indicator
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_vline(
+    xintercept = 2022,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  scale_color_manual(
+    values = c(
+      "Advertised rent" = carabanchel_col,
+      "Used-housing sale price" = dark_col
+    )
+  ) +
+  scale_x_continuous(breaks = 2015:2025) +
+  labs(
+    title = "Housing-market change in Carabanchel",
+    subtitle = "2015 = 100; dashed line marks the end of the common comparison period",
+    x = NULL,
+    y = "Index (2015 = 100)",
+    color = NULL,
+    linetype = NULL
+  ) +
+  theme_report
+
+plot_housing_timeline
+```
+
+Housing-market change was already well established by 2022 and continued afterwards. Advertised rent reached about `r sprintf("%.0f", carabanchel_extended$rent_index[carabanchel_extended$year == 2024])`% of its 2015 level by 2024, while the used-housing sale price reached about `r sprintf("%.0f", carabanchel_extended$sale_index[carabanchel_extended$year == 2025])`% of its 2015 level by 2025.
+
+## 5.2. Demographic and educational trajectory
+
+<!-- FIGURE STATUS: SUPPORTING -->
+
+```{r composition-timeline-plot, include=TRUE, fig.width=10, fig.height=6}
+composition_long <- carabanchel_extended %>%
+  select(
+    year,
+    young_change_pp,
+    foreign_change_pp,
+    university_change_pp
+  ) %>%
+  pivot_longer(
+    cols = c(
+      young_change_pp,
+      foreign_change_pp,
+      university_change_pp
+    ),
+    names_to = "indicator",
+    values_to = "change_pp"
+  ) %>%
+  mutate(
+    indicator = recode(
+      indicator,
+      young_change_pp = "Age 25–39",
+      foreign_change_pp = "Foreign nationals",
+      university_change_pp = "University educated"
+    )
+  )
+
+plot_composition_timeline <- ggplot(
+  composition_long,
+  aes(
+    x = year,
+    y = change_pp,
+    color = indicator,
+    linetype = indicator,
+    group = indicator
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    color = "grey70"
+  ) +
+  geom_vline(
+    xintercept = 2022,
+    linetype = "dashed",
+    color = "grey60"
+  ) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c(
+      "Age 25–39" = dark_col,
+      "Foreign nationals" = carabanchel_col,
+      "University educated" = blue_col
+    )
+  ) +
+  scale_x_continuous(breaks = 2015:2025) +
+  labs(
+    title = "Demographic and educational change in Carabanchel",
+    subtitle = "Percentage-point change from 2015",
+    x = NULL,
+    y = "Change from 2015 (percentage points)",
+    color = NULL,
+    linetype = NULL
+  ) +
+  theme_report
+
+plot_composition_timeline
+```
+
+After 2022, the foreign-national share increased particularly quickly and the share aged 25–39 recovered. The university-educated share also continued to increase, but the series does not show a clear sudden acceleration in educational upgrading.
+
+# 6. Main Findings
+
+1.  **Carabanchel became more demographically dynamic.** Population growth was high and the foreign-national share increased strongly, while the share aged 25–39 did not show a similarly strong rise during the common 2015–2022 period.
+
+2.  **Rental-market change was strong.** Advertised-rent growth ranked `r rent_change_2022$rank[rent_change_2022$district_code == "11"]`/21 and continued strongly afterwards.
+
+3.  **Sale-price growth was substantial but less exceptional.** Carabanchel ranked `r sale_price_change_2022$rank[sale_price_change_2022$district_code == "11"]`/21 for used-housing sale-price growth up to 2022.
+
+4.  **District-wide socioeconomic upgrading was comparatively weak.** Income growth ranked `r income_change_2022$rank[income_change_2022$district_code == "11"]`/21, university-education growth `r education_change_2022$rank[education_change_2022$district_code == "11"]`/21, and higher occupational-status growth `r occupation_change_2022$rank[occupation_change_2022$district_code == "11"]`/21.
+
+5.  **The dimensions therefore moved unevenly.** Carabanchel became more expensive and more demographically dynamic without becoming substantially more socioeconomically advantaged relative to the rest of Madrid during the common comparison period.
+
+The overall pattern is more precise than describing Carabanchel simply as either "gentrified" or "not gentrified". The available evidence is consistent with an **uneven, housing-led process of urban change**, while the district-level stock indicators do not show broad higher-status population change across Carabanchel as a whole.
+
+# References
+
+López-Gay et al. (2021) combine population stock and residential flow data to measure sociodemographic change in Madrid and Barcelona. Their study is useful for distinguishing what can be inferred from stock-based district indicators from stronger claims about residential replacement or displacement.
+
+Recent Madrid research also provides context for interpretation. Ariza, Sorando and Barañano (2024) examine the peripheralisation of lower-income populations in Madrid. Ariza and Sorando (2025) show spatially uneven upgrading around Madrid Río. Sanz-Pérez, López-Gay and Valente (2026) use a multidimensional index to examine the expansion of gentrification across Spanish cities.
+
+Ariza, J., Sorando, D., & Barañano, M. (2024). *La precarización de la periferia. Movilidad y desigualdad residencial en Madrid (2013–2019).* EURE, 50(151). <https://doi.org/10.7764/EURE.50.151.11>
+
+Ariza de la Cruz, J., & Sorando Ortín, D. (2025). *Madrid Río: un cauce de gentrificación verde.* Revista Internacional de Sociología, 83(1), e268. <https://doi.org/10.3989/ris.2025.83.1.1234>
+
+López-Gay, A., Sales-Favà, J., Solana-Solana, M., Fernández, A., & Peralta, A. (2021). *El avance de la gentrificación en Barcelona y Madrid, 2011–2019: análisis socioespacial a partir de un índice de gentrificación.* Estudios Geográficos, 82(291), e084. <https://doi.org/10.3989/estgeogr.202195.095>
+
+Sanz-Pérez, C., López-Gay, A., & Valente, R. (2026). *La expansión de la gentrificación en España: análisis comparativo en diez ciudades a través de un índice multidimensional.* Boletín de la Asociación de Geógrafos Españoles, 107. <https://doi.org/10.21138/bage.3733>

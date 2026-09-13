@@ -1,0 +1,700 @@
+---
+title: "Robustness and Sensitivity Checks"
+author: "Jueun Lee"
+date: "12 September 2026"
+knit: (function(inputFile, encoding) { outputDir <- file.path(dirname(inputFile), "..", "html"); dir.create(outputDir, recursive = TRUE, showWarnings = FALSE); rmarkdown::render(inputFile, encoding = encoding, output_dir = outputDir) })
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+find_project_root <- function(start = getwd()) {
+  current <- normalizePath(start, winslash = "/", mustWork = TRUE)
+
+  repeat {
+    if (
+      dir.exists(file.path(current, "data", "raw")) &&
+      dir.exists(file.path(current, "report"))
+    ) {
+      return(current)
+    }
+
+    parent <- dirname(current)
+    if (identical(parent, current)) {
+      stop("Cannot locate the MUCSS26_TFM project root.")
+    }
+    current <- parent
+  }
+}
+
+project_root <- find_project_root()
+knitr::opts_knit$set(root.dir = project_root)
+
+raw_dir <- file.path(project_root, "data", "raw")
+processed_dir <- file.path(project_root, "data", "processed")
+figures_dir <- file.path(project_root, "figures")
+
+dir.create(processed_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  include = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "95%",
+  fig.retina = 2
+)
+```
+
+```{=html}
+<style>
+.main-container {
+  max-width: 1200px;
+}
+
+table {
+  font-size: 0.90em;
+}
+</style>
+```
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(knitr)
+library(stopwords)
+library(udpipe)
+library(stm)
+library(quanteda)
+library(patchwork)
+```
+
+```{r plot-settings}
+carabanchel_col <- "#C46A3A"
+dark_col <- "#444444"
+red_col <- "#C44E52"
+yellow_col <- "#D9A441"
+blue_col <- "#4C78A8"
+other_col <- "grey75"
+
+norm_code <- function(x) {
+  str_pad(as.character(as.integer(x)), width = 2, pad = "0")
+}
+
+theme_report <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 16),
+    plot.subtitle = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+```
+
+# 0. Purpose
+
+This file contains robustness and sensitivity checks that support the main analyses but are kept separate from the core results. The objective is not to generate additional headline findings, but to check whether the main interpretation depends strongly on particular measurement or modeling choices.
+
+The checks are organized into three parts:
+
+1.  alternative definitions of higher occupational status;
+2.  sensitivity of the topic model to the number of topics;
+3.  outlet-specific topic trends.
+
+None of the figures in this file is intended as a main thesis figure unless explicitly promoted later.
+
+# 1. Part 1 — Occupational-Status Definition
+
+## 1.1. Load occupational data
+
+The main Part 1 measure defines higher occupational status as G1 + G2 divided by all workers in the *Régimen General*. Because the `No consta` category is relatively large in some districts, and because G3 could also reasonably be included in a broader professional-status definition, I compare alternative specifications here.
+
+```{r occupation-import, results='hide'}
+occupation_raw <- read_excel(
+  file.path(raw_dir, "occupation", "occupation_madrid_2015_2022.xlsx"),
+  sheet = "tidy"
+)
+
+occupation_yearly <- occupation_raw |>
+  filter(geography_type == "district") |>
+  mutate(district_code = norm_code(district_code)) |>
+  group_by(year, district_code, district_name) |>
+  summarise(
+    total = sum(
+      n[contribution_group == "Grupo de cotización (Sólo R. General)"],
+      na.rm = TRUE
+    ),
+    g1 = sum(
+      n[contribution_group ==
+          "Ingenieros y licenciados. Personal de alta dirección"],
+      na.rm = TRUE
+    ),
+    g2 = sum(
+      n[contribution_group ==
+          "Ingenieros técnicos, peritos y ayudantes titulados"],
+      na.rm = TRUE
+    ),
+    g3 = sum(
+      n[contribution_group ==
+          "Jefes administrativos y de taller"],
+      na.rm = TRUE
+    ),
+    no_consta = sum(
+      n[contribution_group == "No consta"],
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+```
+
+## 1.2. Compare three definitions
+
+The three specifications are:
+
+- **Main:** `(G1 + G2) / total`
+- **Alternative A:** `(G1 + G2) / (total - No consta)`
+- **Alternative B:** `(G1 + G2 + G3) / total`
+
+For each specification, the analysis calculates the percentage-point change between 2015 and 2022 and ranks all 21 Madrid districts.
+
+```{r occupation-specifications, results='hide'}
+occupation_sensitivity <- occupation_yearly |>
+  mutate(
+    main = (g1 + g2) / total * 100,
+    exclude_no_consta = (g1 + g2) / (total - no_consta) * 100,
+    include_g3 = (g1 + g2 + g3) / total * 100
+  ) |>
+  select(
+    year,
+    district_code,
+    district_name,
+    main,
+    exclude_no_consta,
+    include_g3
+  ) |>
+  pivot_longer(
+    cols = c(main, exclude_no_consta, include_g3),
+    names_to = "specification",
+    values_to = "share"
+  ) |>
+  group_by(district_code, district_name, specification) |>
+  mutate(
+    change_pp = share - share[year == 2015]
+  ) |>
+  ungroup()
+
+occupation_sensitivity_2022 <- occupation_sensitivity |>
+  filter(year == 2022) |>
+  group_by(specification) |>
+  mutate(rank = min_rank(desc(change_pp))) |>
+  ungroup()
+```
+
+```{r occupation-carabanchel-table}
+occupation_sensitivity_2022 |>
+  filter(district_code == "11") |>
+  mutate(
+    specification = recode(
+      specification,
+      main = "Main: G1 + G2 / total",
+      exclude_no_consta = "Exclude No consta from denominator",
+      include_g3 = "Include G3 in numerator"
+    ),
+    change_pp = round(change_pp, 2)
+  ) |>
+  select(
+    Specification = specification,
+    `Change, 2015–2022 (pp)` = change_pp,
+    `Rank among 21 districts` = rank
+  ) |>
+  kable(align = c("l", "r", "r"))
+```
+
+<!-- FIGURE STATUS: ROBUSTNESS ONLY -->
+
+```{r occupation-sensitivity-plot, fig.width=11, fig.height=7}
+plot_occupation_sensitivity <- occupation_sensitivity_2022 |>
+  mutate(
+    specification = recode(
+      specification,
+      main = "Main",
+      exclude_no_consta = "Exclude No consta",
+      include_g3 = "Include G3"
+    ),
+    highlight = if_else(
+      district_code == "11",
+      "Carabanchel",
+      "Other districts"
+    )
+  ) |>
+  ggplot(
+    aes(
+      x = reorder(district_name, change_pp),
+      y = change_pp,
+      fill = highlight
+    )
+  ) +
+  geom_col(width = 0.72) +
+  coord_flip() +
+  facet_wrap(~ specification, ncol = 3, scales = "free_y") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey60") +
+  scale_fill_manual(
+    values = c(
+      "Carabanchel" = carabanchel_col,
+      "Other districts" = other_col
+    )
+  ) +
+  labs(
+    title = "Sensitivity of occupational-status change to alternative definitions",
+    subtitle = "Madrid districts, 2015–2022",
+    x = NULL,
+    y = "Change (percentage points)",
+    fill = NULL
+  ) +
+  theme_report +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 7),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_occupation_sensitivity
+```
+
+The purpose of this check is to verify that Carabanchel's relative position is not an artefact of one narrow occupational definition. In the earlier working analysis, Carabanchel remained near the lower end of the district ranking under all three specifications.
+
+# 2. Part 2 — Topic-Number Sensitivity
+
+## 2.1. Recreate the topic-model input
+
+This section uses the same corpus preparation as the main Part 2 analysis so that only the number of topics changes.
+
+```{r corpus-import, results='hide'}
+news <- read_csv(file.path(raw_dir, "carabanchel_news.csv")) |>
+  mutate(
+    date = parse_date_time(
+      Date,
+      orders = c("dmy", "ymd")
+    ),
+    year = year(date),
+    article_id = row_number(),
+    text = `Full text`
+  )
+```
+
+```{r text-stopwords}
+spanish_stopwords <- tibble(
+  word = stopwords("es", source = "snowball")
+)
+
+custom_stopwords <- tibble(
+  word = c(
+    "madrid", "años", "año", "dos", "tres", "según", "después", "ser", "si", "aunque",
+    "hace", "pasado", "tras", "ahora", "parte", "día", "además", "así", "momento", "número",
+    "ayer", "mientras", "mismo", "todas", "unas", "hacer", "vez", "solo", "allí", "aquí",
+    "haber", "fuentes", "horas", "primero", "último", "mes", "hora", "fuente", "persona",
+    "caso", "hecho"
+  )
+)
+
+topic_stopwords <- tibble(
+  word = c(
+    "tener", "poder", "hacer", "decir", "dar",
+    "ir", "llegar", "ver", "encontrar", "llevar",
+    "contar", "explicar", "pasar", "seguir",
+    "querer", "dejar", "poner", "salir",
+    "venir", "quedar", "saber"
+  )
+)
+```
+
+```{r lemma-preparation, results='hide'}
+lemma_path <- file.path(processed_dir, "lemma_tokens.rds")
+
+if (file.exists(lemma_path)) {
+  lemma_tokens <- readRDS(lemma_path)
+} else {
+  model_dir <- file.path(processed_dir, "udpipe")
+  dir.create(model_dir, recursive = TRUE, showWarnings = FALSE)
+  spanish_model <- udpipe_download_model(
+    language = "spanish",
+    model_dir = model_dir
+  )
+  ud_model <- udpipe_load_model(spanish_model$file_model)
+
+  annotation <- udpipe_annotate(
+    ud_model,
+    x = news$text,
+    doc_id = news$article_id
+  )
+
+  lemma_tokens <- as_tibble(as.data.frame(annotation))
+  saveRDS(lemma_tokens, lemma_path)
+}
+
+lemma_tokens <- lemma_tokens |>
+  mutate(
+    article_id = as.integer(doc_id),
+    word = str_to_lower(lemma)
+  ) |>
+  left_join(
+    news |>
+      select(article_id, year, Outlet),
+    by = "article_id"
+  )
+```
+
+```{r topic-input-preparation, results='hide'}
+topic_tokens <- lemma_tokens |>
+  filter(
+    upos %in% c("NOUN", "ADJ", "VERB"),
+    str_detect(word, "^\\p{L}+$"),
+    str_length(word) > 1
+  ) |>
+  anti_join(spanish_stopwords, by = "word") |>
+  anti_join(custom_stopwords, by = "word") |>
+  anti_join(topic_stopwords, by = "word") |>
+  filter(word != "carabanchel")
+
+topic_texts <- topic_tokens |>
+  group_by(article_id) |>
+  summarise(
+    text = str_c(word, collapse = " "),
+    .groups = "drop"
+  ) |>
+  left_join(
+    news |>
+      select(article_id, year, Outlet),
+    by = "article_id"
+  )
+
+topic_corpus <- corpus(
+  topic_texts,
+  text_field = "text",
+  docid_field = "article_id"
+)
+
+topic_dfm <- tokens(topic_corpus) |>
+  dfm() |>
+  dfm_trim(
+    min_docfreq = 5,
+    docfreq_type = "count"
+  )
+
+stm_input <- convert(
+  topic_dfm,
+  to = "stm"
+)
+```
+
+## 2.2. Compare candidate topic numbers
+
+Candidate solutions with 5, 7, 9, 11 and 13 topics are compared using STM diagnostics. The 7- and 9-topic solutions are then inspected directly because they were the most plausible working alternatives during model development.
+
+```{r topic-number-search, results='hide'}
+set.seed(1234)
+
+k_search <- searchK(
+  documents = stm_input$documents,
+  vocab = stm_input$vocab,
+  K = c(5, 7, 9, 11, 13),
+  init.type = "Spectral"
+)
+```
+
+<!-- FIGURE STATUS: ROBUSTNESS ONLY -->
+
+```{r topic-number-diagnostics, fig.width=10, fig.height=7}
+plot(k_search)
+```
+
+```{r stm-seven-nine, results='hide'}
+set.seed(1234)
+
+stm_7 <- stm(
+  documents = stm_input$documents,
+  vocab = stm_input$vocab,
+  K = 7,
+  init.type = "Spectral",
+  max.em.its = 100
+)
+
+set.seed(1234)
+
+stm_9 <- stm(
+  documents = stm_input$documents,
+  vocab = stm_input$vocab,
+  K = 9,
+  init.type = "Spectral",
+  max.em.its = 100
+)
+```
+
+```{r topic-number-terms}
+cat("\n--- K = 7 ---\n")
+labelTopics(stm_7, n = 10)
+
+cat("\n--- K = 9 ---\n")
+labelTopics(stm_9, n = 10)
+```
+
+<!-- FIGURE STATUS: ROBUSTNESS ONLY -->
+
+```{r stm-seven-summary, fig.width=9, fig.height=6}
+plot(
+  stm_7,
+  type = "summary",
+  n = 7
+)
+```
+
+<!-- FIGURE STATUS: ROBUSTNESS ONLY -->
+
+```{r stm-nine-summary, fig.width=9, fig.height=7}
+plot(
+  stm_9,
+  type = "summary",
+  n = 9
+)
+```
+
+The main analysis retains the 9-topic solution because it provides a more differentiated substantive structure while remaining interpretable. The purpose of this sensitivity check is to verify that the main narrative interpretation is not created solely by choosing `K = 9`.
+
+# 3. Part 2 — Outlet Effect
+
+## 3.1. Why check outlet composition?
+
+The three newspapers are not equally represented across the study period. A shift in the full corpus could therefore partly reflect a change in **which outlet is publishing about Carabanchel**, rather than a change within the coverage of the same outlet.
+
+This check keeps the **same 9-topic model and topic definitions** as the main analysis and recalculates topic prevalence within each outlet. This isolates within-outlet temporal change without creating separate topic models that would no longer be directly comparable.
+
+```{r outlet-counts}
+outlet_period_counts <- news |>
+  mutate(
+    period = case_when(
+      year <= 2019 ~ "2015–2019",
+      year <= 2022 ~ "2020–2022",
+      TRUE ~ "2023–2025"
+    ),
+    period = factor(
+      period,
+      levels = c("2015–2019", "2020–2022", "2023–2025")
+    )
+  ) |>
+  count(Outlet, period, name = "articles")
+
+outlet_period_counts |>
+  pivot_wider(
+    names_from = period,
+    values_from = articles,
+    values_fill = 0
+  ) |>
+  kable(align = "lrrr")
+```
+
+## 3.2. Recreate the 9-topic proportions with outlet metadata
+
+```{r outlet-topic-proportions, results='hide'}
+topic_labels <- c(
+  "Cultural and leisure events",
+  "Urban redevelopment, heritage and land use",
+  "Education and social vulnerability",
+  "Arts, lifestyle and neighbourhood revaluation",
+  "Municipal governance, mobility and public space",
+  "Prison, memory and historical repression",
+  "Housing conflict, rent and displacement",
+  "Health and local public services",
+  "Crime, policing and emergencies"
+)
+
+theta_df <- as_tibble(stm_9$theta)
+names(theta_df) <- paste0("topic_", 1:9)
+
+theta_df <- theta_df |>
+  mutate(doc_index = row_number()) |>
+  bind_cols(
+    stm_input$meta |>
+      select(year, Outlet)
+  )
+
+theta_long <- theta_df |>
+  pivot_longer(
+    cols = starts_with("topic_"),
+    names_to = "topic",
+    values_to = "proportion"
+  ) |>
+  mutate(
+    topic_number = as.integer(str_remove(topic, "topic_")),
+    topic_label = factor(
+      topic_number,
+      levels = 1:9,
+      labels = topic_labels
+    ),
+    period = case_when(
+      year <= 2019 ~ "2015–2019",
+      year <= 2022 ~ "2020–2022",
+      TRUE ~ "2023–2025"
+    ),
+    period = factor(
+      period,
+      levels = c("2015–2019", "2020–2022", "2023–2025")
+    )
+  )
+```
+
+## 3.3. Within-outlet trends in the key topics
+
+The robustness check focuses on the three topics most directly connected to the main narrative interpretation:
+
+- Topic 4 — arts, lifestyle and neighbourhood revaluation;
+- Topic 7 — housing conflict, rent and displacement;
+- Topic 9 — crime, policing and emergencies.
+
+Because *El País* contains relatively few articles overall, its period averages are shown in the data table but are not used as the main visual test. The plot focuses on *El Mundo* and *elDiario.es*, which have substantially larger corpora.
+
+```{r outlet-key-topic-summary, results='hide'}
+key_topic_numbers <- c(4, 7, 9)
+
+outlet_key_topics <- theta_long |>
+  filter(topic_number %in% key_topic_numbers) |>
+  group_by(Outlet, period, topic_number, topic_label) |>
+  summarise(
+    mean_proportion = mean(proportion),
+    .groups = "drop"
+  ) |>
+  left_join(
+    outlet_period_counts,
+    by = c("Outlet", "period")
+  )
+```
+
+```{r outlet-key-topic-table}
+outlet_key_topics |>
+  mutate(
+    mean_proportion = scales::percent(mean_proportion, accuracy = 0.1)
+  ) |>
+  select(
+    Outlet,
+    Period = period,
+    Topic = topic_label,
+    `Mean topic proportion` = mean_proportion,
+    Articles = articles
+  ) |>
+  arrange(Outlet, Period, Topic) |>
+  kable(align = c("l", "l", "l", "r", "r"))
+```
+
+<!-- FIGURE STATUS: ROBUSTNESS ONLY -->
+
+```{r outlet-effect-plot, fig.width=12, fig.height=8}
+plot_outlet_effect <- outlet_key_topics |>
+  filter(Outlet %in% c("El Mundo", "eldiario.es")) |>
+  ggplot(
+    aes(
+      x = period,
+      y = mean_proportion,
+      group = Outlet,
+      color = Outlet
+    )
+  ) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.4) +
+  facet_wrap(
+    ~ topic_label,
+    ncol = 3,
+    scales = "free_y"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Within-outlet change in key topic prevalence",
+    subtitle = "Same 9-topic model; period averages within El Mundo and elDiario.es",
+    x = NULL,
+    y = "Average topic proportion",
+    color = NULL
+  ) +
+  theme_report +
+  theme(
+    axis.text.x = element_text(angle = 25, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_outlet_effect
+```
+
+## 3.4. Yearly view within each major outlet
+
+The period averages above reduce noise caused by individual events. The yearly view is retained as a more detailed diagnostic rather than as the main robustness figure.
+
+```{r outlet-yearly-calculation, results='hide'}
+outlet_yearly_topics <- theta_long |>
+  filter(
+    Outlet %in% c("El Mundo", "eldiario.es"),
+    topic_number %in% key_topic_numbers
+  ) |>
+  group_by(Outlet, year, topic_number, topic_label) |>
+  summarise(
+    mean_proportion = mean(proportion),
+    .groups = "drop"
+  ) |>
+  left_join(
+    news |>
+      count(Outlet, year, name = "articles"),
+    by = c("Outlet", "year")
+  )
+```
+
+<!-- FIGURE STATUS: ROBUSTNESS ONLY / DIAGNOSTIC -->
+
+```{r outlet-yearly-plot, fig.width=12, fig.height=9}
+plot_outlet_yearly <- ggplot(
+  outlet_yearly_topics,
+  aes(
+    x = year,
+    y = mean_proportion,
+    color = Outlet,
+    group = Outlet
+  )
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(aes(size = articles), alpha = 0.8) +
+  facet_wrap(
+    ~ topic_label,
+    ncol = 1,
+    scales = "free_y"
+  ) +
+  scale_x_continuous(breaks = 2015:2025) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_size_continuous(name = "Articles") +
+  labs(
+    title = "Yearly topic prevalence within the two major outlets",
+    subtitle = "Point size indicates the number of articles in each outlet-year",
+    x = NULL,
+    y = "Average topic proportion",
+    color = NULL
+  ) +
+  theme_report +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+
+plot_outlet_yearly
+```
+
+The key question is whether the broad direction observed in the full corpus is also visible within at least one major outlet, especially the increasing visibility of arts/lifestyle/neighbourhood-revaluation coverage and the reduced prominence of crime/policing/emergency coverage relative to the earlier period. If the within-outlet patterns broadly point in the same direction, outlet composition is unlikely to be the sole explanation for the overall narrative shift. If they differ substantially, the final thesis should explicitly treat outlet composition as an important limitation.
+
+# 4. Robustness Summary
+
+These checks should be interpreted as supporting evidence rather than as separate findings.
+
+- **Occupational status:** test whether Carabanchel's low relative upgrading depends on the exact occupational definition.
+- **Topic number:** test whether the substantive narrative structure depends strongly on choosing nine topics.
+- **Outlet effect:** test whether the temporal narrative shift remains visible within individual news outlets rather than arising only from changes in outlet composition.
+
+The robustness file is intentionally separate from the main Part 1 and Part 2 working analyses so that the core research narrative remains readable while all major analytical choices remain transparent and reproducible.
