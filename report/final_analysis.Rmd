@@ -97,7 +97,7 @@ theme_report <- theme_minimal(base_size = 12) +
 
 # 0. Research Design
 
-This report is the final consolidated analysis file for the MUCSS 2026 TFM project, *[thesis title]*. Its purpose is to document the analytical workflow clearly, ensure transparency in the research process, and make the analysis reproducible.
+This report is the final consolidated analysis file for the MUCSS 2026 TFM project, *Carabanchel in Transition: Material and Narrative Change in Madrid, 2015–2025*. Its purpose is to document the analytical workflow clearly, ensure transparency in the research process, and make the analysis reproducible.
 
 The report provides a concise overview of the main analytical steps and results. More detailed and fully expanded analyses, including intermediate calculations, additional visualisations, and robustness checks, are available in the `analysis` folder of the GitHub repository:
 
@@ -115,7 +115,7 @@ By combining these two parts, the study examines both measurable material change
 ## 0.1. Data sources
 
 | Dimension | Main measure / source |
-|:-----------------------------------|:-----------------------------------|
+|:---|:---|
 | Population, age, nationality | Madrid Municipal Register (*Padrón municipal histórico*) |
 | Income | Madrid City Council household-income distribution data |
 | Advertised rent | Madrid Data Bank, based on historical Idealista reports |
@@ -910,7 +910,7 @@ Housing moved differently from the socioeconomic indicators. Advertised-rent gro
 
 ## 1.5. Putting the material dimensions together
 
-The previous sections examine demographic, socioeconomic, and housing-market change separately. This section brings the main material indicators together to make the contrast between housing-market pressure and socioeconomic change easier to compare across districts.
+The previous sections examine demographic, socioeconomic, and housing-market change separately. This section brings the main material indicators together to make the contrast between housing-market change and socioeconomic change easier to compare across districts.
 
 Because the indicators are measured in different units, their 2015–2022 changes are first standardized across the 21 Madrid districts using z-scores. A value above zero indicates a change above the district average, while a value below zero indicates a change below the district average.
 
@@ -932,7 +932,7 @@ Education and occupational status are combined first because they capture closel
 
 The resulting **socioeconomic upgrading score** represents each district's relative position within Madrid. A score of zero indicates the average change across the 21 districts, not an absence of change.
 
-Advertised-rent growth is standardised separately and plotted against this socioeconomic measure. The purpose is not to create a single gentrification score, but to examine whether districts experiencing stronger rental-market pressure also experienced stronger socioeconomic upgrading during the same period.
+Advertised-rent growth is standardised separately and plotted against this socioeconomic measure. The purpose is not to create a single gentrification score, but to examine whether districts experiencing stronger advertised-rent growth also experienced stronger socioeconomic upgrading during the same period.
 
 ```{r district-change-dataset-final, results='hide'}
 district_change_2022 <- rent_change %>%
@@ -1032,7 +1032,7 @@ plot_rent_socio <- ggplot(
     )
   ) +
   labs(
-    title = "Rental-market pressure and socioeconomic upgrading",
+    title = "Advertised-rent growth and socioeconomic upgrading",
     subtitle = "Madrid districts, change from 2015 to 2022",
     x = "Socioeconomic upgrading",
     y = "Rent growth (standardized)",
@@ -1045,9 +1045,11 @@ plot_rent_socio <- ggplot(
 plot_rent_socio
 ```
 
-The plot makes the contrast visible: Carabanchel is positioned above the Madrid district average in rental growth but below the average in socioeconomic upgrading. In other words, relatively strong rental-market pressure between 2015 and 2022 did not coincide with equally strong district-wide growth in income, university education, or higher occupational status.
+The plot makes the contrast visible: Carabanchel is positioned above the Madrid district average in advertised-rent growth but below the average in socioeconomic upgrading. In other words, strong advertised-rent growth between 2015 and 2022 did not coincide with equally strong district-wide growth in income, university education, or higher occupational status.
 
 This contrast is the main finding of the material analysis and provides the basis for interpreting Carabanchel's recent change as uneven across different dimensions.
+
+A similar combination of relatively strong advertised-rent growth and weak socioeconomic change is also visible in several southern districts, including Puente de Vallecas, Villaverde, Usera, and Latina.
 
 ## 1.6. Carabanchel after 2022
 
@@ -1942,7 +1944,7 @@ Each article is then represented as a document in a document-feature matrix and 
 
 The number of topics was not fixed in advance. Candidate solutions with 5, 7, 9, 11, and 13 topics were compared during model development using STM diagnostics and substantive interpretability. The 7- and 9-topic solutions were inspected more closely, and the **9-topic solution** was retained because it provided greater thematic differentiation while remaining interpretable. The full topic-number sensitivity check is reported separately in the robustness analysis.
 
-Topic labels are not generated automatically by the model. They are assigned after examining the highest-probability terms and the articles with the highest estimated proportion for each topic. The labels are therefore descriptive interpretations of the content grouped by the model.
+Topic labels are not generated automatically by the model. They are assigned after examining the highest-probability and FREX terms, together with the articles with the highest estimated proportion for each topic. The labels are therefore descriptive interpretations of the content grouped by the model.
 
 Finally, topic prevalence over time is calculated from the estimated topic proportions. For each year, I take the mean proportion of each topic across all articles published in that year. These yearly averages indicate how prominent each theme was within the coverage of that year. They are interpreted as changes in the overall mix of news coverage rather than as a smooth or necessarily linear measure of narrative change, since individual events can produce substantial yearly peaks.
 
@@ -2030,6 +2032,28 @@ topic_labels <- c(
 )
 ```
 
+```{r stm-topic-terms-final, results='hide'}
+
+topic_terms <- labelTopics(stm_9, n = 5)
+
+topic_terms_table <- tibble(
+  Topic = 1:9,
+  `Topic label` = topic_labels,
+  `Highest-probability terms` = apply(
+    topic_terms$prob,
+    1,
+    paste,
+    collapse = ", "
+  ),
+  `FREX terms` = apply(
+    topic_terms$frex,
+    1,
+    paste,
+    collapse = ", "
+  )
+)
+```
+
 ```{r topic-proportions-final, results='hide'}
 theta_df <- as_tibble(stm_9$theta)
 names(theta_df) <- paste0("topic_", 1:9)
@@ -2106,7 +2130,7 @@ To select articles systematically, I first identify the articles with the highes
 The selected articles are then read in full, focusing on three questions: how Carabanchel is represented, who the main actors are, and what language or framing is used. This qualitative step is used to interpret the computational results and to distinguish changes in topic prevalence from changes in the way the district itself is described.
 
 | Period / topic | Example | What it adds to the interpretation |
-|:-----------------------|:-----------------------|:-----------------------|
+|:---|:---|:---|
 | 2016 · crime/policing | *El parricida de Carabanchel…* | Carabanchel is mainly the location attached to an incident; the district itself is barely characterised. |
 | 2020 · housing conflict | *La presión vecinal… fuerza a la Sareb a parar un desalojo* | Housing appears as a conflict over residential stability, eviction and property ownership. |
 | 2021 · arts/revaluation | *Una galería… para la nueva meca del arte contemporáneo* | One of the clearest early articles explicitly describing a working-class/industrial district as a new art centre. |
@@ -2120,18 +2144,18 @@ The narrative result is therefore best described as a **broadening of representa
 
 # 3. Synthesis of Material and Narrative Change
 
-Taken together, the two parts show that different dimensions of change in Carabanchel have developed with very different strengths. The material analysis shows substantial demographic growth and strong housing-market pressure, but much weaker district-wide socioeconomic upgrading. At the same time, the narrative analysis shows a broader and increasingly place-focused representation of Carabanchel, including greater attention to culture, housing, redevelopment, and neighbourhood identity.
+Taken together, the two parts show that different dimensions of change in Carabanchel have developed with very different strengths. The material analysis shows substantial demographic growth and particularly strong advertised-rent growth, but much weaker district-wide socioeconomic upgrading. At the same time, the narrative analysis shows a broader and increasingly place-focused representation of Carabanchel, including greater attention to culture, housing, redevelopment, and neighbourhood identity.
 
 | Dimension | Main evidence | Interpretation |
-|:-----------------------|:-----------------------|:-----------------------|
+|:---|:---|:---|
 | Demographic change | Strong population growth and a relatively large increase in the foreign-national share, while the share aged 25-39 shows a different pattern | Substantial change but not a uniform shift across all indicators |
 | Socioeconomic change | Income growth ranks 21st, university-education growth 18th, and higher occupational-status growth 19th | Limited district-wide upgrading relative to the rest of Madrid |
-| Housing market | Advertised-rent growth ranks 5th; rent and sale prices continue to rise after 2022 | Strong and continuing housing-market pressure |
-| News representation | Later coverage gives greater visibility to discusses culture, housing, redevelopment, and neighborhood identity | Broader and more place-focused narrative |
+| Housing market | Advertised-rent growth ranks 5th; used-housing sale-price growth is close to the district average; both series continue to rise after 2022 | Strong advertised-rent growth, while sale-price growth is less exceptional across districts |
+| News representation | Later coverage gives greater visibility to culture, housing, redevelopment, and neighbourhood identity | Broader and more place-focused narrative |
 
-The distinctive pattern is therefore not simply that Carabanchel has or has not "gentrified". The district has experienced population growth, substantial housing-market pressure, and an increasingly visible symbolic revaluation, without a comparable district-wide rise in the socioeconomic status of its residents.
+The distinctive pattern is therefore not simply that Carabanchel has or has not "gentrified". The district has experienced population growth, strong advertised-rent growth, and an increasingly visible symbolic revaluation, without a comparable district-wide rise in the socioeconomic status of its residents.
 
-This combination is better understood as an **uneven and partly decoupled process of urban change with a strong housing-market component**. Housing prices and rents have risen rapidly, and the ways in which Carabanchel is represented are also changing, while the available income, education, and occupational indicators show much weaker relative socioeconomic change.
+This combination is better understood as an **uneven and asynchronous process of urban change**, in which advertised-rent growth was more pronounced than district-wide socioeconomic upgrading. The ways in which Carabanchel is represented are also changing, while the available income, education, and occupational indicators show much weaker relative socioeconomic change.
 
 The narrative findings add an important dimension to this pattern. Later media coverage increasingly treats Carabanchel as a place with a changing cultural, residential, and neighbourhood identity, even though the district-level socioeconomic indicators do not show equally strong upgrading. In this sense, changes in housing conditions, demographic composition, socioeconomic status, and place representation appear to be developing unevenly rather than as one uniform process.
 
@@ -2161,9 +2185,9 @@ The analysis supports a cautious interpretation rather than a definitive classif
 
 # 6. Overall Conclusion
 
-Across the study period, Carabanchel experienced substantial demographic change, strong housing-market pressure, and an increasingly visible and place-focused media narrative. At the same time, the 2015–2022 cross-district comparison shows comparatively limited growth in income, university education, and higher occupational status.
+Across the study period, Carabanchel experienced substantial demographic change, particularly strong advertised-rent growth, and an increasingly visible and place-focused media narrative. At the same time, the 2015–2022 cross-district comparison shows comparatively limited growth in income, university education, and higher occupational status.
 
-Taken together, these findings point to an **uneven and partly decoupled process of urban change with a strong housing-market component**. Carabanchel has become more expensive and has attracted a growing population, while its socioeconomic composition has changed much less strongly relative to other Madrid districts.
+Taken together, these findings point to an **uneven process of urban change** in which strong advertised-rent growth and changing place representation coexist with relatively limited district-wide socioeconomic upgrading. Carabanchel has attracted a growing population, while its socioeconomic composition has changed much less strongly relative to other Madrid districts.
 
 The narrative analysis adds another dimension to this pattern. Later coverage increasingly discusses Carabanchel not only as the location of events, but as a neighbourhood with a changing cultural, residential, and symbolic identity.
 

@@ -19,3 +19,8 @@ data/raw/carabanchel_news.csv
 *.log
 
 .RDataTmp
+
+# Files used only for thesis manuscript preparation
+thesis_figures/
+export_figures_PROJECT_READY.Rmd
+report/referencias_draft.bib
